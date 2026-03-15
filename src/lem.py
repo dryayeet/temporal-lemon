@@ -375,7 +375,6 @@ history.append({"role": "assistant", "content": FIRST_MESSAGE})
 while True:
     user_input = input("You: ").strip()
     if user_input.lower() in ["exit", "quit"]:
-        print("👋 Chat ended.")
         break
 
     history.append({"role": "user", "content": user_input})
@@ -432,4 +431,4 @@ while True:
         INTERNAL_STATE = update_internal_state(INTERNAL_STATE, user_input, reply)
 
     except Exception as e:
-        print("⚠️ Error:", e)
+        print("Error:", e)
