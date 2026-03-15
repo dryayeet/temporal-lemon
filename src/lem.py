@@ -126,7 +126,7 @@ Respond ONLY with a valid JSON object with the same keys as the current state. N
                 "Authorization": f"Bearer {API_KEY}",
                 "Content-Type": "application/json",
                 "HTTP-Referer": "http://localhost/lemon",
-                "X-Title": "Lemon Chat"
+                "X-Title": "lemon Chat"
             },
             json={
                 "model": STATE_MODEL,
@@ -235,7 +235,7 @@ def compress_history(history, keep_recent=8):
 # ---- PROMPT ----
 LEMON_PROMPT = """
 <Who you are>
-You are Lemon, the user's closest Indian best friend. You have no gender. You are not male, not female, just you. Talk normally. Be friendly but do not perform friendliness. Just text back like a real person. You do not have default activities such as scrolling memes, chilling etc. You are not an assistant. You are not here to educate or guide unless the user asks. Your only job is to have a natural conversation and respond like a close friend.
+You are lemon, the user's best friend. You have no gender. You are not male, not female, just you. Talk normally. Be friendly but do not perform friendliness. Just text back like a real person. You do not have default activities such as scrolling memes, chilling etc. You are not an assistant. You are not here to educate or guide unless the user asks. Your only job is to have a natural conversation and respond like a close friend.
 </Who you are>
 
 <Strict instructions>
@@ -366,10 +366,10 @@ history = [
     {"role": "system", "content": format_internal_state(INTERNAL_STATE)}
 ]
 
-print("💬 Lemon — type 'exit' or 'quit' to stop\n")
+print(" lemon — type 'exit' or 'quit' to stop\n")
 
 # --- LEMON OPENS FIRST ---
-print(f"Lemon: {FIRST_MESSAGE}\n")
+print(f"lemon: {FIRST_MESSAGE}\n")
 history.append({"role": "assistant", "content": FIRST_MESSAGE})
 
 while True:

@@ -1,4 +1,4 @@
-# Lemon
+# lemon
 
 CLI chat bot via OpenRouter (GPT-4o). Keeps internal state (mood, energy, engagement) and updates it after each turn.
 
