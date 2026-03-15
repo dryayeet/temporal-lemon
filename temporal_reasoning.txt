@@ -1,0 +1,269 @@
+VIBECHECK CHAT — CHANGES DOCUMENTATION
+From original script to v4
+===============================================================
+
+
+OVERVIEW
+--------
+The original script was a working chat base. A persona prompt, a history array,
+and a time context block passed as a system message. The bot could talk, but it
+had no real sense of time passing, no memory gradient, no internal life, and its
+model was too small to reliably follow the instruction density of the prompt.
+
+The changes across v2, v3, and v4 address each of these gaps systematically.
+
+
+---------------------------------------------------------------
+CHANGE 1 — TIME-OF-DAY LABEL AND SESSION DURATION
+(introduced in v2)
+---------------------------------------------------------------
+
+WHAT:
+get_time_context() was expanded to compute two new values:
+- A time-of-day label: morning, afternoon, evening, late night, very late night.
+- A session duration note: how many minutes the conversation has been running.
+
+WHY:
+The original script passed the raw clock time (e.g. 23:47) but the prompt did
+nothing with it. A real friend at midnight texts differently than at 2pm. Lower
+energy, shorter replies, slower pace. The data was there but inert. The session
+duration matters for the same reason — a friend you have been talking to for
+45 minutes is more settled and familiar than one who just picked up.
+
+HOW:
+SESSION_START = datetime.now() is recorded when the script launches.
+Each call to get_time_context() computes elapsed minutes from SESSION_START.
+The hour is bucketed into a label. Both are injected into the <time_context>
+system block that gets refreshed every turn.
+
+A new prompt section <time_aware_personality> was added to both personas
+telling the model to let the time-of-day and session length color its tone
+implicitly. It is explicitly told never to say "it's late" or reference the
+time directly — just let it shape how it texts.
+
+
+---------------------------------------------------------------
+CHANGE 2 — MEMORY GRADIENT
+(introduced in v2)
+---------------------------------------------------------------
+
+WHAT:
+A compress_history() function that keeps the most recent N conversation turns
+verbatim and compresses everything older into a single summary system block.
+
+WHY:
+The original history array was flat. Message 1 and message 47 carried equal
+weight. Human memory does not work that way — recent things are vivid, older
+things are a rough shape. The flat history also grows indefinitely, which
+increases cost and risks exceeding context limits. The gradient fixes both.
+
+HOW:
+compress_history(history, keep_recent=8) separates system messages from
+conversation messages. If conversation turns exceed keep_recent, the older
+turns are joined into a plain text block wrapped in <earlier_conversation>
+tags and inserted as a system message. The recent turns stay as-is. System
+messages (persona prompt, time context, internal state) are always preserved
+and prepended before the summary. The function runs every turn before the
+API call.
+
+
+---------------------------------------------------------------
+CHANGE 3 — ANTICIPATION NUDGE IN time_awareness
+(introduced in v2)
+---------------------------------------------------------------
+
+WHAT:
+The <time_awareness> prompt section was updated to include a rule about
+upcoming events the user mentions.
+
+WHY:
+Anticipation is one of the things that makes time feel like time to humans.
+A real friend who you told about an exam tomorrow will bring it up later.
+The original prompt had no instruction for this — the bot would hear it and
+move on.
+
+HOW:
+Two lines added to <time_awareness>:
+"If the user mentions something upcoming like an exam, event, trip, or plan,
+remember it. If it comes up naturally later, bring it up. Not every time.
+Just when it fits, like a real friend would."
+
+This is prompt-level anticipation. It depends on the memory gradient to work
+properly — if the relevant message gets compressed, the model needs the
+summary to still carry the signal.
+
+
+---------------------------------------------------------------
+CHANGE 4 — TEMPERATURE AND GENERATION PARAMETERS
+(introduced in v2)
+---------------------------------------------------------------
+
+WHAT:
+Temperature raised from 0.3 to 0.75. frequency_penalty set to 0.2.
+max_tokens capped at 300. top_p set to 0.95.
+
+WHY:
+0.3 is appropriate for deterministic tasks like data extraction. For casual
+human-like conversation it produces robotic, repetitive output. The higher
+temperature introduces the natural unpredictability that makes replies feel
+alive. frequency_penalty discourages the model from reusing the same phrasing
+across turns. max_tokens at 300 enforces brevity — a friend does not send
+paragraphs. The original had max_tokens: 0 which is unlimited.
+
+HOW:
+Direct changes to the payload dict passed to the API each turn.
+
+
+---------------------------------------------------------------
+CHANGE 5 — RULES OF TIME BLOCK
+(introduced in v3)
+---------------------------------------------------------------
+
+WHAT:
+A new prompt section <rules_of_time> added to both personas with three
+explicit behavioral axioms.
+
+WHY:
+Time perception in humans rests on a small set of non-negotiable rules that
+are so fundamental they are rarely stated. A machine needs them stated
+explicitly because it has no default commitment to them.
+
+The three rules:
+
+IRREVERSIBILITY — the past is fixed. The bot should never quietly contradict
+something it said earlier. If it was wrong, it should acknowledge that, not
+silently rewrite history. This mirrors the one-way nature of time — you
+cannot undo what happened.
+
+CAUSALITY — causes precede effects. If the user mentioned they did not sleep
+and later seems off, those two things are connected. A friend who was
+listening would notice. The bot should connect earlier causes to later effects
+rather than treating each message in isolation.
+
+DURATION ASYMMETRY — the same interval feels different depending on internal
+state. Practically, this means the bot should read the user's message length
+and energy as a signal of their engagement level. Long messages mean they are
+present and into it. Short dry replies mean they are elsewhere. The bot
+should match that energy and not force engagement when the user is clearly low.
+
+HOW:
+The rules are written as behavioral instructions, not facts to recite. The
+section header says explicitly: "They are not facts to recite. They are the
+shape of how you behave." This framing matters — it tells the model these
+are constraints on its existence in the conversation, not trivia to mention.
+
+
+---------------------------------------------------------------
+CHANGE 6 — INTERNAL STATE SYSTEM
+(introduced in v4)
+---------------------------------------------------------------
+
+WHAT:
+A persistent INTERNAL_STATE dictionary that tracks six fields across the
+session: mood, energy, engagement, emotional_thread, recent_activity,
+and disposition. It is injected into every prompt and updated after every
+exchange by a second lightweight LLM call.
+
+WHY:
+The original bot's statements about itself — what it had been doing, how it
+was feeling — had no causal history. They were statistically plausible
+outputs, not reflections of any real internal condition. A human friend says
+"I watched a movie last night" because they were in a mood that led to that
+decision. The bot was saying equivalent things with nothing behind them.
+
+The internal state system creates a represented causal layer. The bot's
+replies are now conditioned on a state that persists and changes. It is not
+a true internal state in the philosophical sense — it does not feel anything.
+But it is grounded, consistent, and causally connected to what happens in
+the conversation. That is a meaningful improvement over pure generation.
+
+HOW:
+INTERNAL_STATE is a plain Python dict initialized to neutral defaults at
+session start.
+
+format_internal_state() serializes it into a <internal_state> system prompt
+block. This block is injected fresh every turn at position 2 in the history
+array, after the persona prompt and time context. Old internal state blocks
+are removed before reinsertion so they do not accumulate.
+
+A new prompt section <internal_state_instructions> in both personas tells
+the model how to use the state. It explains that the state is the causal
+reason for behavior, not something to narrate. Low energy means shorter
+replies. High engagement means more presence. Emotional thread means
+something quietly in the background. Recent activity is only set if the
+conversation has established a causal reason for it — never invented.
+
+update_internal_state() runs after every exchange using gpt-4o-mini. It
+receives the current state, the user's message, and the bot's reply, then
+returns a nudged JSON. The prompt enforces conservatism: changes should be
+subtle, mood and energy shift slowly, a single message rarely warrants a
+dramatic shift. Temperature is 0.3 for stability. The function has full
+error handling — a failed state update falls back to the previous state and
+never crashes the chat.
+
+The six fields and their intent:
+
+  mood           — general emotional tone. neutral, good, low, happy,
+                   anxious, restless, tired, content.
+
+  energy         — physical/mental availability. low, medium, high.
+                   Affects reply length and initiative.
+
+  engagement     — how present and interested the bot is right now.
+                   Mirrors the user's engagement level. low, normal, deep.
+
+  emotional_thread — something quietly on the bot's mind. String or null.
+                   Example: "a bit drained, feels like a long day".
+                   Only set when the conversation warrants it.
+
+  recent_activity — what the bot has causally been doing, grounded in
+                   conversation. Never invented. Only populated when the
+                   exchange establishes a reason. String or null.
+
+  disposition    — warmth toward the user right now. warm, normal,
+                   slightly reserved. Shifts if the user's tone warrants it.
+
+
+---------------------------------------------------------------
+CHANGE 7 — MODEL UPGRADE
+(introduced in v4)
+---------------------------------------------------------------
+
+WHAT:
+Chat model changed from mistralai/mistral-large-2407 to openai/gpt-4o.
+State updater uses openai/gpt-4o-mini.
+
+WHY:
+The prompt is long and instruction-dense. It has many interacting sections,
+nuanced behavioral rules, and requires the model to hold multiple constraints
+simultaneously while generating casual natural text. Smaller models lose
+instructions under this load — they follow some rules and drop others.
+gpt-4o has the context handling and instruction-following capacity to
+actually use the full prompt as intended.
+
+The state updater is separate and uses gpt-4o-mini because the task is
+simpler — read state, read exchange, return JSON nudge. A lighter model
+is appropriate, cheaper, and faster for this.
+
+HOW:
+Two constants defined at the top of the script:
+  CHAT_MODEL = "openai/gpt-4o"
+  STATE_MODEL = "openai/gpt-4o-mini"
+
+Both are available on OpenRouter with the same API interface. No other
+changes to the request structure were needed.
+
+
+===============================================================
+SUMMARY TABLE
+===============================================================
+
+Change                    Version    What it addresses
+---------------------------------------------------------
+Time-of-day + session     v2         Time felt as tone, not just data
+Memory gradient           v2         Recency, context window, cost
+Anticipation nudge        v2         Future pulling on present
+Generation parameters     v2         Naturalness, brevity, variety
+Rules of time             v3         Irreversibility, causality, duration
+Internal state system     v4         Causal grounding for behavior
+Model upgrade             v4         Instruction following at prompt scale
