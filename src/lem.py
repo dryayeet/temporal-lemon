@@ -1,16 +1,16 @@
-"""Lemon CLI entry point: REPL with streaming chat, slash commands, SQLite memory."""
+"""Lemon CLI entry point: REPL with empathy pipeline, slash commands, SQLite memory."""
 import random
-import sys
 from datetime import datetime
 
 import requests
 
 import db
-from chat import stream_chat
+from chat import play_tokens
 from commands import ChatContext, dispatch, is_command
 from config import CHAT_MODEL, KEEP_RECENT_TURNS, STATE_UPDATE_EVERY
 from facts import FACTS_TAG, format_user_facts
-from history import compress_history, replace_system_block
+from history import replace_system_block
+from pipeline import run_empathy_turn
 from prompt import LEMON_OPENERS, LEMON_PROMPT
 from state import (
     format_internal_state,
@@ -31,6 +31,17 @@ def build_initial_history(internal_state: dict, session_start: datetime) -> list
     if facts_block:
         history.append({"role": "system", "content": facts_block})
     return history
+
+
+def refresh_base_blocks(ctx: ChatContext, session_start: datetime) -> list[dict]:
+    """Return a copy of ctx.history with time/state/facts system blocks refreshed."""
+    h = list(ctx.history)
+    h = replace_system_block(h, "<time_context>", get_time_context(session_start), position=1)
+    h = replace_system_block(h, "<internal_state>", format_internal_state(ctx.internal_state), position=2)
+    facts_block = format_user_facts(db.get_facts())
+    if facts_block:
+        h = replace_system_block(h, FACTS_TAG, facts_block, position=3)
+    return h
 
 
 def main() -> None:
@@ -70,36 +81,29 @@ def main() -> None:
                 print(f"\n{result.output}\n")
                 continue
 
-            ctx.history.append({"role": "user", "content": user_input})
-            db.log_message(session_id, "user", user_input)
-
-            # refresh ephemeral system blocks
-            ctx.history = replace_system_block(
-                ctx.history, "<time_context>", get_time_context(session_start), position=1
-            )
-            ctx.history = replace_system_block(
-                ctx.history, "<internal_state>", format_internal_state(ctx.internal_state), position=2
-            )
-            facts_block = format_user_facts(db.get_facts())
-            if facts_block:
-                ctx.history = replace_system_block(ctx.history, FACTS_TAG, facts_block, position=3)
-            ctx.history = compress_history(ctx.history, keep_recent=KEEP_RECENT_TURNS)
+            base_history = refresh_base_blocks(ctx, session_start)
 
             try:
-                reply = stream_chat(
-                    ctx.history,
+                reply, trace = run_empathy_turn(
+                    user_msg=user_input,
+                    base_history=base_history,
                     energy=ctx.internal_state.get("energy", "medium"),
                     model=ctx.chat_model,
+                    session_id=session_id,
+                    keep_recent_turns=KEEP_RECENT_TURNS,
+                    on_phase=lambda phase: print(f"  · {phase}...", flush=True),
                 )
             except (requests.RequestException, RuntimeError) as e:
                 print(f"\n[chat error: {e}]\n")
-                ctx.history.pop()
                 continue
 
+            ctx.last_trace = trace
+            ctx.history.append({"role": "user", "content": user_input})
             ctx.history.append({"role": "assistant", "content": reply})
-            db.log_message(session_id, "assistant", reply)
-            exchange_count += 1
 
+            play_tokens(reply, energy=ctx.internal_state.get("energy", "medium"))
+
+            exchange_count += 1
             if exchange_count % STATE_UPDATE_EVERY == 0:
                 ctx.internal_state = update_internal_state(
                     ctx.internal_state, user_input, reply

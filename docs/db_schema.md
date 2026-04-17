@@ -16,17 +16,20 @@ A row exists per process invocation of `lem.py` or per server start of `web.py`.
 
 ### `messages`
 
-| column       | type    | notes                                       |
-| ------------ | ------- | ------------------------------------------- |
-| `id`         | INTEGER | primary key                                 |
-| `session_id` | INTEGER | FK → sessions(id), `ON DELETE CASCADE`      |
-| `role`       | TEXT    | `system` / `user` / `assistant`             |
-| `content`    | TEXT    | the message body                            |
-| `created_at` | TEXT    | ISO timestamp                               |
+| column       | type    | notes                                                  |
+| ------------ | ------- | ------------------------------------------------------ |
+| `id`         | INTEGER | primary key                                            |
+| `session_id` | INTEGER | FK → sessions(id), `ON DELETE CASCADE`                 |
+| `role`       | TEXT    | `system` / `user` / `assistant`                        |
+| `content`    | TEXT    | the message body                                       |
+| `created_at` | TEXT    | ISO timestamp                                          |
+| `emotion`    | TEXT    | classifier label (user msgs only); nullable           |
+| `intensity`  | REAL    | 0.0–1.0 (user msgs only); nullable                     |
+| `salience`   | REAL    | retrieval weight (user msgs only); nullable            |
 
-Index: `idx_messages_session(session_id)`.
+Indexes: `idx_messages_session(session_id)`, `idx_messages_emotion(emotion)`.
 
-We log `user` and `assistant` messages in the chat loop. System blocks (persona, time, internal state, facts) are *not* logged here — they're regenerated each turn anyway.
+We log `user` and `assistant` messages in the chat loop. System blocks (persona, time, internal state, facts, emotion, ToM) are *not* logged here — they're regenerated each turn anyway. The emotion fields on user messages are populated by the empathy pipeline at log time.
 
 ### `state_snapshots`
 
@@ -59,19 +62,36 @@ Everything goes through helper functions in `db.py`:
 
 ```python
 sid = db.start_session()                              # → int
-db.log_message(sid, "user", "hi")
+db.log_message(sid, "user", "hi", emotion="neutral", intensity=0.2)
 db.log_message(sid, "assistant", "hey")
 db.save_state_snapshot({...}, session_id=sid)
 db.upsert_fact("city", "Bangalore", source_session_id=sid)
 db.end_session(sid)
 
-db.latest_state()              # → dict | None
-db.list_sessions(limit=20)     # → list[dict]
-db.get_facts()                 # → dict[str, str]
-db.session_messages(sid)       # → list[dict]
+db.latest_state()                                # → dict | None
+db.list_sessions(limit=20)                       # → list[dict]
+db.get_facts()                                   # → dict[str, str]
+db.session_messages(sid)                         # → list[dict]
+db.find_messages_by_emotion("sadness",           # → list[dict]
+                            exclude_session_id=sid,
+                            limit=3)
+db.find_recent_messages(limit=6)                 # → list[dict]
 ```
 
 Every function takes an optional `path` argument that defaults to `config.DB_PATH` resolved at call time. Tests inject a per-test `tmp_path` via the autouse `isolated_db` fixture in `conftest.py`.
+
+## Migrations
+
+Schema changes are versioned via the `schema_version` table. On every connect:
+
+1. The base `SCHEMA` runs (idempotent `CREATE TABLE IF NOT EXISTS`). Fresh databases get the latest shape immediately.
+2. The `MIGRATIONS` list is consulted. Each `(version, [stmts])` entry whose `version > current` runs its statements, then records the version.
+3. `ALTER TABLE ADD COLUMN` is the typical statement; we tolerate `duplicate column name` errors for fresh dbs that already have the column from step 1.
+
+Adding a new column means:
+1. Add it to `SCHEMA` (so fresh dbs get it).
+2. Append `(N, ["ALTER TABLE ... ADD COLUMN ..."])` to `MIGRATIONS` (so existing dbs catch up).
+3. Bump `LATEST_VERSION` automatically via `max()`.
 
 ## Notes on durability
 

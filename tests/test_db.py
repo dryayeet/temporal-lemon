@@ -69,3 +69,61 @@ def test_list_sessions_respects_limit():
         db.start_session()
     rows = db.list_sessions(limit=2)
     assert len(rows) == 2
+
+
+# ---------- emotion fields ----------
+
+def test_log_message_stores_emotion_fields():
+    sid = db.start_session()
+    db.log_message(sid, "user", "I'm sad", emotion="sadness", intensity=0.7, salience=0.7)
+
+    msgs = db.session_messages(sid)
+    assert msgs[0]["emotion"] == "sadness"
+    assert msgs[0]["intensity"] == 0.7
+    assert msgs[0]["salience"] == 0.7
+
+
+def test_log_message_emotion_fields_default_to_none():
+    sid = db.start_session()
+    db.log_message(sid, "assistant", "hey")
+    msgs = db.session_messages(sid)
+    assert msgs[0]["emotion"] is None
+    assert msgs[0]["intensity"] is None
+
+
+def test_find_messages_by_emotion_filters_by_role_and_label():
+    sid = db.start_session()
+    db.log_message(sid, "user", "u-sad", emotion="sadness", intensity=0.5)
+    db.log_message(sid, "assistant", "a-sad", emotion="sadness", intensity=0.5)
+    db.log_message(sid, "user", "u-joy", emotion="joy", intensity=0.5)
+
+    rows = db.find_messages_by_emotion("sadness", limit=10)
+    assert [r["content"] for r in rows] == ["u-sad"]
+
+
+def test_find_messages_by_emotion_excludes_session():
+    s1 = db.start_session()
+    db.log_message(s1, "user", "old", emotion="anger", intensity=0.5)
+    s2 = db.start_session()
+    db.log_message(s2, "user", "new", emotion="anger", intensity=0.5)
+
+    rows = db.find_messages_by_emotion("anger", exclude_session_id=s2)
+    assert [r["content"] for r in rows] == ["old"]
+
+
+def test_find_recent_messages_orders_newest_first():
+    s1 = db.start_session()
+    db.log_message(s1, "user", "first")
+    db.log_message(s1, "assistant", "second")
+    db.log_message(s1, "user", "third")
+
+    rows = db.find_recent_messages(limit=2)
+    assert [r["content"] for r in rows] == ["third", "second"]
+
+
+def test_schema_version_recorded():
+    db.start_session()  # triggers schema setup
+    with db.connect() as c:
+        rows = c.execute("SELECT version FROM schema_version ORDER BY version").fetchall()
+        versions = [r["version"] for r in rows]
+        assert db.LATEST_VERSION in versions

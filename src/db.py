@@ -1,8 +1,11 @@
 """SQLite-backed persistence for lemon.
 
 Holds long-term memory: every session, every message, the internal-state
-trajectory, and any user facts the bot has extracted. One file, one
-schema, idempotent migrations on connect.
+trajectory, user facts, and per-turn emotion classifications used by the
+empathy pipeline.
+
+Schema is created idempotently on connect; column additions for existing
+databases run through a tiny version-bumped migrations table.
 """
 import json
 import sqlite3
@@ -13,7 +16,14 @@ from typing import Iterator, Optional
 
 import config
 
+# Fresh databases get this. Existing databases get the same shape via the
+# migrations list below, which adds columns one version at a time.
+
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at   TEXT NOT NULL,
@@ -25,9 +35,13 @@ CREATE TABLE IF NOT EXISTS messages (
     session_id   INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     role         TEXT NOT NULL,        -- system | user | assistant
     content      TEXT NOT NULL,
-    created_at   TEXT NOT NULL
+    created_at   TEXT NOT NULL,
+    emotion      TEXT,                 -- detected primary emotion (user msgs)
+    intensity    REAL,                 -- 0.0–1.0
+    salience     REAL                  -- 0.0–1.0 retrieval weight
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+CREATE INDEX IF NOT EXISTS idx_messages_emotion ON messages(emotion);
 
 CREATE TABLE IF NOT EXISTS state_snapshots (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,25 +60,60 @@ CREATE TABLE IF NOT EXISTS facts (
 );
 """
 
+# (target_version, [statements to bump TO that version]).
+# "duplicate column name" errors are tolerated because SCHEMA above already
+# adds these on a freshly-created database — only existing dbs need the ALTER.
+MIGRATIONS: list[tuple[int, list[str]]] = [
+    (1, [
+        "ALTER TABLE messages ADD COLUMN emotion TEXT",
+        "ALTER TABLE messages ADD COLUMN intensity REAL",
+        "ALTER TABLE messages ADD COLUMN salience REAL",
+    ]),
+]
+
+LATEST_VERSION = max((v for v, _ in MIGRATIONS), default=0)
+
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
 def _resolve(path: Optional[Path]) -> Path:
-    """Resolve to the requested path, or fall back to the live config setting."""
     return path if path is not None else config.DB_PATH
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring an existing db up to LATEST_VERSION. No-op on a fresh db."""
+    row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+    current = row[0] if row and row[0] is not None else 0
+
+    for target, statements in MIGRATIONS:
+        if target <= current:
+            continue
+        for stmt in statements:
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (?)", (target,)
+        )
 
 
 @contextmanager
 def connect(path: Optional[Path] = None) -> Iterator[sqlite3.Connection]:
-    """Yield a connection with foreign keys enabled and the schema in place."""
+    """Yield a connection with foreign keys enabled, schema in place, and migrations applied."""
     p = _resolve(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(p))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    _migrate(conn)
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_version (version) VALUES (?)", (LATEST_VERSION,)
+    )
     try:
         yield conn
         conn.commit()
@@ -103,20 +152,70 @@ def list_sessions(limit: int = 20, path: Optional[Path] = None) -> list[dict]:
 
 # ---------- messages ----------
 
-def log_message(session_id: int, role: str, content: str, path: Optional[Path] = None) -> None:
+def log_message(
+    session_id: int,
+    role: str,
+    content: str,
+    emotion: Optional[str] = None,
+    intensity: Optional[float] = None,
+    salience: Optional[float] = None,
+    path: Optional[Path] = None,
+) -> int:
+    """Insert a message row. Returns the new message id."""
     with connect(path) as c:
-        c.execute(
-            "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-            (session_id, role, content, _now()),
+        cur = c.execute(
+            "INSERT INTO messages "
+            "(session_id, role, content, created_at, emotion, intensity, salience) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session_id, role, content, _now(), emotion, intensity, salience),
         )
+        return cur.lastrowid
 
 
 def session_messages(session_id: int, path: Optional[Path] = None) -> list[dict]:
     with connect(path) as c:
         rows = c.execute(
-            "SELECT role, content, created_at FROM messages "
-            "WHERE session_id = ? ORDER BY id ASC",
+            "SELECT role, content, created_at, emotion, intensity, salience "
+            "FROM messages WHERE session_id = ? ORDER BY id ASC",
             (session_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def find_messages_by_emotion(
+    emotion: str,
+    exclude_session_id: Optional[int] = None,
+    limit: int = 5,
+    path: Optional[Path] = None,
+) -> list[dict]:
+    """Return user messages tagged with `emotion` from past sessions, newest first."""
+    sql = (
+        "SELECT id, session_id, role, content, created_at, emotion, intensity, salience "
+        "FROM messages WHERE role = 'user' AND emotion = ? "
+    )
+    params: list = [emotion]
+    if exclude_session_id is not None:
+        sql += "AND session_id != ? "
+        params.append(exclude_session_id)
+    sql += "ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+
+    with connect(path) as c:
+        rows = c.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+
+def find_recent_messages(
+    limit: int = 6,
+    path: Optional[Path] = None,
+) -> list[dict]:
+    """Most recent user/assistant rows across all sessions, newest first."""
+    with connect(path) as c:
+        rows = c.execute(
+            "SELECT id, session_id, role, content, created_at, emotion, intensity "
+            "FROM messages WHERE role IN ('user', 'assistant') "
+            "ORDER BY id DESC LIMIT ?",
+            (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -124,7 +223,6 @@ def session_messages(session_id: int, path: Optional[Path] = None) -> list[dict]
 # ---------- state snapshots ----------
 
 def latest_state(path: Optional[Path] = None) -> Optional[dict]:
-    """Return the most recent state snapshot as a dict, or None if none exist."""
     with connect(path) as c:
         row = c.execute(
             "SELECT state_json FROM state_snapshots ORDER BY id DESC LIMIT 1"

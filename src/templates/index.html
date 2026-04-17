@@ -56,7 +56,8 @@
       font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
       max-width: 90%; white-space: pre-wrap;
     }
-    .typing { align-self: flex-start; color: var(--muted); font-style: italic; padding: 4px 14px; }
+    .typing { align-self: flex-start; color: var(--muted); font-style: italic; padding: 4px 14px; display: flex; align-items: center; gap: 4px; }
+    .typing .phase-label { transition: opacity 0.2s; }
     .typing .dots::after { content: "..."; display: inline-block; width: 18px; text-align: left; animation: blink 1.2s infinite; }
     @keyframes blink { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
     .composer { display: flex; gap: 8px; padding: 14px 20px; border-top: 1px solid rgba(0,0,0,0.06); }
@@ -116,10 +117,16 @@
     function typingIndicator() {
       const div = document.createElement("div");
       div.className = "typing";
-      div.innerHTML = '<span class="dots">lemon is typing</span>';
+      const label = document.createElement("span");
+      label.className = "phase-label";
+      label.textContent = "lemon is thinking";
+      const dots = document.createElement("span");
+      dots.className = "dots";
+      div.appendChild(label);
+      div.appendChild(dots);
       messagesEl.appendChild(div);
       messagesEl.scrollTop = messagesEl.scrollHeight;
-      return div;
+      return { el: div, setPhase: (p) => { label.textContent = "lemon is " + p; } };
     }
 
     async function loadHistory() {
@@ -159,17 +166,16 @@
     }
 
     async function streamChat(message) {
-      const lemonBubble = bubble("assistant", "");
       const typing = typingIndicator();
+      let lemonBubble = null;   // created on first token
 
       const r = await fetch("/chat", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message }),
       });
-      typing.remove();
 
       if (!r.ok) {
-        lemonBubble.remove();
+        typing.el.remove();
         bubble("system", `error: ${r.status} ${await r.text()}`);
         return;
       }
@@ -188,11 +194,18 @@
           if (!evt.startsWith("data:")) continue;
           try {
             const payload = JSON.parse(evt.slice(5).trim());
-            if (payload.event === "token") {
+            if (payload.event === "phase") {
+              typing.setPhase(payload.data);
+            } else if (payload.event === "token") {
+              if (!lemonBubble) {
+                typing.el.remove();
+                lemonBubble = bubble("assistant", "");
+              }
               lemonBubble.textContent += payload.data;
               messagesEl.scrollTop = messagesEl.scrollHeight;
             } else if (payload.event === "error") {
-              lemonBubble.remove();
+              typing.el.remove();
+              if (lemonBubble) lemonBubble.remove();
               bubble("system", "error: " + payload.data);
             }
           } catch (e) { /* ignore parse errors */ }

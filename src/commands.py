@@ -10,6 +10,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+import config
 import db
 import state as state_mod
 
@@ -22,6 +23,7 @@ class ChatContext:
     chat_model: str = ""
     session_id: Optional[int] = None
     exit_requested: bool = False
+    last_trace: Optional[object] = None   # most recent PipelineTrace, for /why
 
 
 @dataclass
@@ -149,6 +151,60 @@ def _sessions(ctx: ChatContext, args: str) -> CommandResult:
     for r in rows:
         end = r["ended_at"] or "(ongoing)"
         lines.append(f"  #{r['id']:<4} started {r['started_at']}  ended {end}  msgs={r['msg_count']}")
+    return CommandResult("\n".join(lines))
+
+
+@command("empathy", "toggle the empathy pipeline: /empathy on|off (no arg shows status)")
+def _empathy(ctx: ChatContext, args: str) -> CommandResult:
+    arg = args.strip().lower()
+    if arg in ("on", "enable", "true", "1"):
+        config.ENABLE_EMPATHY_PIPELINE = True
+        return CommandResult("empathy pipeline: ON")
+    if arg in ("off", "disable", "false", "0"):
+        config.ENABLE_EMPATHY_PIPELINE = False
+        return CommandResult("empathy pipeline: OFF")
+    if not arg:
+        status = "ON" if config.ENABLE_EMPATHY_PIPELINE else "OFF"
+        return CommandResult(f"empathy pipeline: {status}")
+    return CommandResult("usage: /empathy on|off")
+
+
+@command("why", "show the empathy pipeline trace for the last reply")
+def _why(ctx: ChatContext, args: str) -> CommandResult:
+    trace = ctx.last_trace
+    if trace is None:
+        return CommandResult("no trace yet — send a message first.")
+    if not getattr(trace, "pipeline_used", False):
+        return CommandResult("empathy pipeline was off for the last reply.")
+
+    lines = ["last reply's pipeline trace:"]
+    emo = getattr(trace, "emotion", None)
+    if emo:
+        lines.append(
+            f"  emotion: {emo.get('primary')} (intensity {emo.get('intensity', 0):.2f})"
+        )
+        if emo.get("undertones"):
+            lines.append(f"           undertones: {', '.join(emo['undertones'])}")
+        if emo.get("underlying_need"):
+            lines.append(f"           underlying need: {emo['underlying_need']}")
+
+    tom = getattr(trace, "tom", None)
+    if tom:
+        lines.append(f"  feeling:   {tom.get('feeling') or '(none)'}")
+        lines.append(f"  avoid:     {tom.get('avoid') or '(none)'}")
+        lines.append(f"  do:        {tom.get('what_helps') or '(none)'}")
+
+    memories = getattr(trace, "memories", []) or []
+    lines.append(f"  memories used: {len(memories)}")
+
+    check = getattr(trace, "check", None)
+    if check is not None:
+        if check.passed:
+            lines.append("  post-check: passed")
+        else:
+            lines.append(f"  post-check: failed ({', '.join(check.failures)})")
+            if getattr(trace, "regenerated", False):
+                lines.append("  -> regenerated once with critique")
     return CommandResult("\n".join(lines))
 
 

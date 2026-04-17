@@ -10,17 +10,25 @@ if not API_KEY:
     raise ValueError("API Key not found! Check your .env file.")
 
 # --- MODELS ---
-# Claude on OpenRouter. Strong instruction-following + supports prompt caching.
-CHAT_MODEL = os.getenv("LEMON_CHAT_MODEL", "anthropic/claude-sonnet-4.6")
+# Claude Haiku 4.5 on OpenRouter for both the chat and the auxiliary calls.
+# Cheap, fast, supports Anthropic-style prompt caching.
+CHAT_MODEL = os.getenv("LEMON_CHAT_MODEL", "anthropic/claude-haiku-4.5")
 STATE_MODEL = os.getenv("LEMON_STATE_MODEL", "anthropic/claude-haiku-4.5")
 
-# Set to false to send a plain string system prompt (e.g. when running on a
-# non-Anthropic model that doesn't understand cache_control blocks).
-ENABLE_PROMPT_CACHE = os.getenv("LEMON_PROMPT_CACHE", "1") not in ("0", "false", "no")
+# Prompt caching uses Anthropic-style cache_control content blocks. OpenAI
+# models don't accept that format, so we default ON only when the chat model
+# is anthropic/*. Override via LEMON_PROMPT_CACHE=0 to disable.
+_default_cache = "1" if CHAT_MODEL.startswith("anthropic/") else "0"
+ENABLE_PROMPT_CACHE = os.getenv("LEMON_PROMPT_CACHE", _default_cache) not in ("0", "false", "no")
 
 # --- BEHAVIOR KNOBS ---
 STATE_UPDATE_EVERY = 2        # run the state updater every N exchanges
 KEEP_RECENT_TURNS = 8         # recent turns kept verbatim before compression
+
+# --- EMPATHY PIPELINE ---
+ENABLE_EMPATHY_PIPELINE = os.getenv("LEMON_EMPATHY", "1") not in ("0", "false", "no")
+EMPATHY_RETRY_ON_FAIL = os.getenv("LEMON_EMPATHY_RETRY", "1") not in ("0", "false", "no")
+MEMORY_RETRIEVAL_LIMIT = int(os.getenv("LEMON_MEMORY_LIMIT", "3"))
 
 # Streaming "human typing" pacing: base seconds/token, scaled by energy
 HUMANIZE_STREAM = os.getenv("LEMON_HUMANIZE", "1") not in ("0", "false", "no")

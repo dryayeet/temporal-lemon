@@ -21,11 +21,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 import db
-from chat import humanize_delay, iter_chat
+from chat import humanize_delay, re_split_keep_whitespace
 from commands import ChatContext, dispatch, is_command
 from config import CHAT_MODEL, KEEP_RECENT_TURNS, STATE_UPDATE_EVERY
 from facts import FACTS_TAG, format_user_facts
-from history import compress_history, replace_system_block
+from history import replace_system_block
+from pipeline import run_empathy_turn
 from prompt import LEMON_OPENERS, LEMON_PROMPT
 from state import (
     format_internal_state,
@@ -72,6 +73,16 @@ _ctx.history.append({"role": "assistant", "content": _first})
 db.log_message(_session_id, "assistant", _first)
 
 
+def _refresh_base_blocks() -> list[dict]:
+    h = list(_ctx.history)
+    h = replace_system_block(h, "<time_context>", get_time_context(_session_start), position=1)
+    h = replace_system_block(h, "<internal_state>", format_internal_state(_ctx.internal_state), position=2)
+    facts_block = format_user_facts(db.get_facts())
+    if facts_block:
+        h = replace_system_block(h, FACTS_TAG, facts_block, position=3)
+    return h
+
+
 # ---------- request models ----------
 
 class ChatRequest(BaseModel):
@@ -99,58 +110,65 @@ def chat(req: ChatRequest) -> StreamingResponse:
         raise HTTPException(400, "empty message")
 
     if is_command(msg):
-        # commands aren't streamed — easier as a separate endpoint
         raise HTTPException(400, "use POST /command for slash commands")
 
     return StreamingResponse(_stream_reply(msg), media_type="text/event-stream")
 
 
 def _stream_reply(user_msg: str) -> Iterator[bytes]:
-    """SSE generator: yield each token, then a DONE event with the full reply."""
+    """SSE generator: emit phase events, then run the pipeline, then replay tokens."""
     global _exchange_count
 
+    # phase events are buffered into this list by the on_phase callback so we
+    # can yield them between pipeline steps. Async would be cleaner; this is
+    # simpler and the steps are short.
+    phase_queue: list[str] = []
+
+    def push_phase(phase: str) -> None:
+        phase_queue.append(phase)
+
     with _lock:
-        _ctx.history.append({"role": "user", "content": user_msg})
-        db.log_message(_session_id, "user", user_msg)
-
-        _ctx.history = replace_system_block(
-            _ctx.history, "<time_context>", get_time_context(_session_start), position=1
-        )
-        _ctx.history = replace_system_block(
-            _ctx.history, "<internal_state>", format_internal_state(_ctx.internal_state), position=2
-        )
-        facts_block = format_user_facts(db.get_facts())
-        if facts_block:
-            _ctx.history = replace_system_block(_ctx.history, FACTS_TAG, facts_block, position=3)
-        _ctx.history = compress_history(_ctx.history, keep_recent=KEEP_RECENT_TURNS)
-
-        history_snapshot = list(_ctx.history)
+        base_history = _refresh_base_blocks()
         energy = _ctx.internal_state.get("energy", "medium")
         model = _ctx.chat_model
 
-    chunks: list[str] = []
     try:
-        for delta in iter_chat(history_snapshot, model=model):
-            chunks.append(delta)
-            yield _sse("token", delta)
-            time.sleep(humanize_delay(delta, energy))
+        # we yield the first phase immediately so the UI sees "lemon is reading you..."
+        yield _sse("phase", "reading you")
+
+        reply, trace = run_empathy_turn(
+            user_msg=user_msg,
+            base_history=base_history,
+            energy=energy,
+            model=model,
+            session_id=_session_id,
+            keep_recent_turns=KEEP_RECENT_TURNS,
+            on_phase=push_phase,
+        )
+
+        # flush queued phase events (skipping the first which we already sent)
+        for phase in phase_queue[1:]:
+            yield _sse("phase", phase)
+
     except (requests.RequestException, RuntimeError) as e:
-        with _lock:
-            _ctx.history.pop()  # roll back the user message
         yield _sse("error", str(e))
         return
 
-    full = "".join(chunks)
-
     with _lock:
-        _ctx.history.append({"role": "assistant", "content": full})
-        db.log_message(_session_id, "assistant", full)
+        _ctx.last_trace = trace
+        _ctx.history.append({"role": "user", "content": user_msg})
+        _ctx.history.append({"role": "assistant", "content": reply})
         _exchange_count += 1
         if _exchange_count % STATE_UPDATE_EVERY == 0:
-            _ctx.internal_state = update_internal_state(_ctx.internal_state, user_msg, full)
+            _ctx.internal_state = update_internal_state(_ctx.internal_state, user_msg, reply)
             save_state(_ctx.internal_state, session_id=_session_id)
 
-    yield _sse("done", full)
+    # replay the buffered reply token-by-token with humanized pacing
+    for chunk in re_split_keep_whitespace(reply):
+        yield _sse("token", chunk)
+        time.sleep(humanize_delay(chunk, energy))
+
+    yield _sse("done", reply)
 
 
 def _sse(event: str, data: str) -> bytes:
@@ -195,6 +213,33 @@ def get_history() -> JSONResponse:
         for m in _ctx.history if m["role"] != "system"
     ]
     return JSONResponse(convo)
+
+
+@app.get("/trace")
+def get_trace() -> JSONResponse:
+    """Return the most recent pipeline trace as JSON, for debugging from the UI."""
+    trace = _ctx.last_trace
+    if trace is None:
+        return JSONResponse({"available": False})
+    return JSONResponse({
+        "available": True,
+        "pipeline_used": getattr(trace, "pipeline_used", False),
+        "emotion": getattr(trace, "emotion", None),
+        "tom": getattr(trace, "tom", None),
+        "memories": [
+            {"when": m.get("created_at"), "emotion": m.get("emotion"),
+             "content": m.get("content")}
+            for m in (getattr(trace, "memories", None) or [])
+        ],
+        "regenerated": getattr(trace, "regenerated", False),
+        "check": (
+            None if getattr(trace, "check", None) is None
+            else {
+                "passed": trace.check.passed,
+                "failures": trace.check.failures,
+            }
+        ),
+    })
 
 
 # ---------- entry point ----------

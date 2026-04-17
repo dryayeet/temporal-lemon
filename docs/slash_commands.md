@@ -14,6 +14,8 @@ Type any of these in the CLI or web input. Anything starting with `/` is dispatc
 | `/rewind`                     | drop the last exchange (your message + lemon's reply)                 |
 | `/model name`                 | switch chat model for this session (e.g. `anthropic/claude-haiku-4.5`)|
 | `/sessions`                   | list recent sessions stored in the database                           |
+| `/empathy on\|off`            | toggle the empathy pipeline (no arg shows current status)             |
+| `/why`                        | show the empathy-pipeline trace for the last reply                    |
 | `/quit` or `/exit`            | end the chat                                                          |
 
 ## Examples
@@ -53,6 +55,28 @@ you: /model anthropic/claude-haiku-4.5
 chat model set to anthropic/claude-haiku-4.5 for this session.
 ```
 The override lasts until the process exits — `config.CHAT_MODEL` is unchanged.
+
+**See why lemon answered the way it did:**
+```
+you: I had a rough day
+lemon: yeah, that sounds heavy. what happened?
+you: /why
+last reply's pipeline trace:
+  emotion: sadness (intensity 0.65)
+           underlying need: feel heard, not solved
+  feeling:   tired and let down
+  avoid:     don't jump to advice
+  do:        stay with it, ask one open question
+  memories used: 2
+  post-check: passed
+```
+
+**Turn the pipeline off (e.g. for cost or latency):**
+```
+you: /empathy off
+empathy pipeline: OFF
+```
+Drops to one chat call per turn (no emotion classifier, no ToM, no post-check).
 
 ## Adding your own command
 
