@@ -1,2 +1,27 @@
-lemon/
+# secrets
 .env
+
+# virtual envs
+lemon/
+.venv/
+venv/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# local state
+.lemon_state.json
+.lemon.db
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+logs/
+
+# editor / tooling
+.claude/
+.vscode/
+.idea/
