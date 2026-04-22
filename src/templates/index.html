@@ -6,25 +6,33 @@
   <title>lemon</title>
   <style>
     :root {
-      --bg: #fff8e7;
-      --panel: #fff3d1;
-      --bubble-you: #ffe9a0;
-      --bubble-lemon: #fffbea;
-      --bubble-system: #f3e8c6;
-      --text: #3a2f10;
-      --muted: #8a7847;
-      --accent: #d99c1c;
+      --bg: #fdf6e3;
+      --panel: #f7ecc9;
+      --bubble-you: #f2c94c;
+      --bubble-lemon: #fffdf5;
+      --bubble-system: #efe3bd;
+      --text: #2a2110;
+      --muted: #8a7a4a;
+      --accent: #b8860b;
+      --border: rgba(74, 56, 12, 0.08);
+      --border-strong: rgba(74, 56, 12, 0.14);
+      --shadow-bubble: 0 4px 12px rgba(74, 56, 12, 0.08);
+      --shadow-panel: 0 1px 2px rgba(74, 56, 12, 0.04);
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #1a1810;
-        --panel: #25210e;
-        --bubble-you: #4a3e10;
-        --bubble-lemon: #2c280f;
-        --bubble-system: #1f1c0a;
-        --text: #f0e7c4;
-        --muted: #b9a875;
-        --accent: #f1b832;
+        --bg: #14100a;
+        --panel: #1c1710;
+        --bubble-you: #a8781c;
+        --bubble-lemon: #221b10;
+        --bubble-system: #1a150c;
+        --text: #f4e9c9;
+        --muted: #a8936a;
+        --accent: #e8c07a;
+        --border: rgba(244, 233, 201, 0.08);
+        --border-strong: rgba(244, 233, 201, 0.14);
+        --shadow-bubble: 0 4px 12px rgba(0, 0, 0, 0.25);
+        --shadow-panel: 0 1px 2px rgba(0, 0, 0, 0.3);
       }
     }
     * { box-sizing: border-box; }
@@ -35,22 +43,24 @@
       background: var(--panel);
       padding: 16px;
       overflow-y: auto;
-      border-right: 1px solid rgba(0,0,0,0.06);
+      border-right: 1px solid var(--border);
+      box-shadow: var(--shadow-panel);
     }
     .sidebar h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin: 16px 0 8px; }
     .sidebar h2:first-child { margin-top: 0; }
-    .sidebar pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; background: rgba(0,0,0,0.04); padding: 8px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; }
+    .sidebar pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; background: var(--border); padding: 8px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; }
     .main { flex: 1; display: flex; flex-direction: column; max-width: 100%; }
-    .header { padding: 14px 20px; border-bottom: 1px solid rgba(0,0,0,0.06); display: flex; align-items: center; justify-content: space-between; }
-    .header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+    .header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+    .header h1 { margin: 0; font-size: 20px; font-weight: 700; }
     .header .hint { font-size: 12px; color: var(--muted); }
-    .messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 10px; }
+    .messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
     .bubble {
-      max-width: 75%; padding: 10px 14px; border-radius: 14px;
-      line-height: 1.4; white-space: pre-wrap; word-wrap: break-word;
+      max-width: 75%; padding: 12px 16px; border-radius: 18px;
+      line-height: 1.45; white-space: pre-wrap; word-wrap: break-word;
+      box-shadow: var(--shadow-bubble);
     }
-    .bubble.you { align-self: flex-end; background: var(--bubble-you); border-bottom-right-radius: 4px; }
-    .bubble.lemon { align-self: flex-start; background: var(--bubble-lemon); border-bottom-left-radius: 4px; }
+    .bubble.you { align-self: flex-end; background: var(--bubble-you); border-bottom-right-radius: 6px; }
+    .bubble.lemon { align-self: flex-start; background: var(--bubble-lemon); border-bottom-left-radius: 6px; }
     .bubble.system {
       align-self: center; background: var(--bubble-system); color: var(--muted);
       font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
@@ -60,19 +70,22 @@
     .typing .phase-label { transition: opacity 0.2s; }
     .typing .dots::after { content: "..."; display: inline-block; width: 18px; text-align: left; animation: blink 1.2s infinite; }
     @keyframes blink { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
-    .composer { display: flex; gap: 8px; padding: 14px 20px; border-top: 1px solid rgba(0,0,0,0.06); }
+    .composer { display: flex; gap: 8px; padding: 14px 20px; border-top: 1px solid var(--border); }
     .composer input {
-      flex: 1; padding: 10px 14px; border-radius: 20px;
-      border: 1px solid rgba(0,0,0,0.1); background: var(--bg); color: var(--text);
+      flex: 1; padding: 10px 14px; border-radius: 22px;
+      border: 1px solid var(--border-strong); background: var(--bg); color: var(--text);
       font-size: 14px; outline: none;
+      transition: border-color 0.15s;
     }
     .composer input:focus { border-color: var(--accent); }
     .composer button {
       background: var(--accent); color: white; border: none;
-      padding: 0 18px; border-radius: 20px; font-weight: 600; cursor: pointer;
+      padding: 0 18px; border-radius: 22px; font-weight: 600; cursor: pointer;
+      transition: filter 0.15s;
     }
+    .composer button:hover:not(:disabled) { filter: brightness(1.08); }
     .composer button:disabled { opacity: 0.4; cursor: not-allowed; }
-    .refresh { background: none; border: 1px solid rgba(0,0,0,0.1); color: var(--muted); padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 11px; }
+    .refresh { background: none; border: 1px solid var(--border-strong); color: var(--muted); padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 11px; }
     .refresh:hover { color: var(--text); }
   </style>
 </head>
@@ -133,7 +146,13 @@
       const r = await fetch("/history");
       const data = await r.json();
       messagesEl.innerHTML = "";
-      data.forEach(m => bubble(m.role, m.content));
+      data.forEach(m => {
+        if (m.role === "assistant" && m.content.includes("\n\n")) {
+          m.content.split("\n\n").forEach(p => { if (p) bubble("assistant", p); });
+        } else {
+          bubble(m.role, m.content);
+        }
+      });
     }
 
     async function loadState() {
@@ -197,11 +216,16 @@
             if (payload.event === "phase") {
               typing.setPhase(payload.data);
             } else if (payload.event === "token") {
-              if (!lemonBubble) {
-                typing.el.remove();
-                lemonBubble = bubble("assistant", "");
+              const chunks = payload.data.split("\n\n");
+              for (let i = 0; i < chunks.length; i++) {
+                if (i > 0) { lemonBubble = null; }
+                if (chunks[i] === "") continue;
+                if (!lemonBubble) {
+                  if (typing.el.parentNode) typing.el.remove();
+                  lemonBubble = bubble("assistant", "");
+                }
+                lemonBubble.textContent += chunks[i];
               }
-              lemonBubble.textContent += payload.data;
               messagesEl.scrollTop = messagesEl.scrollHeight;
             } else if (payload.event === "error") {
               typing.el.remove();
