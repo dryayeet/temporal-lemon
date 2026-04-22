@@ -25,3 +25,6 @@ logs/
 .claude/
 .vscode/
 .idea/
+
+#graphs
+graphify-out/
