@@ -205,6 +205,10 @@ def _why(ctx: ChatContext, args: str) -> CommandResult:
             lines.append(f"  post-check: failed ({', '.join(check.failures)})")
             if getattr(trace, "regenerated", False):
                 lines.append("  -> regenerated once with critique")
+
+    facts = getattr(trace, "facts_extracted", {}) or {}
+    if facts:
+        lines.append(f"  facts saved: {', '.join(f'{k}={v}' for k, v in facts.items())}")
     return CommandResult("\n".join(lines))
 
 

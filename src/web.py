@@ -239,6 +239,7 @@ def get_trace() -> JSONResponse:
                 "failures": trace.check.failures,
             }
         ),
+        "facts_extracted": getattr(trace, "facts_extracted", {}) or {},
     })
 
 

@@ -1,6 +1,6 @@
 # lemon
 
-A chatbot that simulates a friend, not an assistant. Runs on OpenRouter (Claude Haiku 4.5 by default, with Anthropic-style prompt caching on the persona block). Keeps an internal emotional state, runs a per-turn empathy pipeline (emotion classifier → memory → theory-of-mind → sentiment-mirror check), remembers facts about you across sessions in SQLite, and types like a person.
+A chatbot that simulates a friend, not an assistant. Runs on OpenRouter (Claude Haiku 4.5 by default, with Anthropic-style prompt caching on the persona block). Keeps an internal emotional state, runs a per-turn empathy pipeline (emotion classifier → memory → theory-of-mind → sentiment-mirror check), auto-extracts durable facts from conversation and remembers them across sessions in SQLite, and types like a person.
 
 Two frontends share the same backend: a CLI REPL and a single-page web UI.
 
@@ -26,8 +26,10 @@ Optional overrides (also via env var):
 | `LEMON_EMPATHY`        | `1`                              | enable the empathy pipeline                                    |
 | `LEMON_EMPATHY_RETRY`  | `1`                              | regenerate once when the post-check trips                      |
 | `LEMON_MEMORY_LIMIT`   | `3`                              | how many past matching-emotion messages to surface per turn    |
+| `LEMON_AUTO_FACTS`     | `1`                              | auto-extract durable facts from each exchange                  |
+| `LEMON_AUTO_FACTS_MAX` | `3`                              | max facts saved per turn                                       |
 | `LEMON_HUMANIZE`       | `1`                              | toggle per-token typing pacing                                 |
-| `LEMON_DB`             | `.lemon.db`                      | SQLite path (gitignored)                                       |
+| `LEMON_DB`             | `.lemon.db`                      | SQLite path (resolved against project root; absolute OK)       |
 
 ## Run
 

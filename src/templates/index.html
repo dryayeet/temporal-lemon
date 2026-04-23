@@ -213,7 +213,7 @@
       const r = await fetch("/facts");
       const facts = await r.json();
       $("facts").textContent = Object.keys(facts).length === 0
-        ? "(none yet)"
+        ? "(none yet — lemon saves facts as you chat, or type /remember key=value)"
         : Object.entries(facts).map(([k, v]) => k + ": " + v).join("\n");
     }
     async function loadSessions() {

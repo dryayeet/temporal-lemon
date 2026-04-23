@@ -16,6 +16,7 @@ from typing import Callable, Optional
 
 import config
 import db
+import fact_extractor
 from chat import generate_reply
 from emotion import EMOTION_TAG, classify_emotion, format_emotion_block
 from empathy_check import CheckResult, check_response
@@ -32,6 +33,7 @@ PHASE_REMEMBERING = "remembering"
 PHASE_THINKING = "thinking"
 PHASE_REPLYING = "replying"
 PHASE_REVISING = "rephrasing"
+PHASE_NOTING = "making a note"
 
 
 @dataclass
@@ -45,6 +47,7 @@ class PipelineTrace:
     regenerated: bool = False
     final: Optional[str] = None
     pipeline_used: bool = False
+    facts_extracted: dict = field(default_factory=dict)
 
 
 def _last_leading_system_index(history: list[dict]) -> int:
@@ -179,6 +182,29 @@ def run_empathy_turn(
     if session_id is not None:
         db.log_message(session_id, "assistant", final)
     trace.final = final
+
+    # ---------- 6. fact extraction ----------
+    # Wrapped in a broad try/except so any extractor bug degrades silently to
+    # "no facts this turn" rather than breaking the reply that already shipped.
+    if config.ENABLE_AUTO_FACTS and session_id is not None:
+        if on_phase:
+            on_phase(PHASE_NOTING)
+        try:
+            existing = db.get_facts()
+            extracted = fact_extractor.extract_facts(
+                user_msg=user_msg,
+                bot_reply=final,
+                existing_facts=existing,
+                recent_msgs=recent,
+                model=model,
+                max_new=config.AUTO_FACTS_MAX_PER_TURN,
+            )
+            for k, v in list(extracted.items())[:config.AUTO_FACTS_MAX_PER_TURN]:
+                db.upsert_fact(k, v, source_session_id=session_id)
+            trace.facts_extracted = extracted
+        except Exception as e:
+            print(f"  [fact extraction step failed: {e}]")
+
     return final, trace
 
 
