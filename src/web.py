@@ -30,7 +30,7 @@ from pipeline import run_empathy_turn
 from prompt import LEMON_OPENERS, LEMON_PROMPT
 from state import (
     format_internal_state,
-    load_state,
+    fresh_session_state,
     save_state,
     update_internal_state,
 )
@@ -44,7 +44,8 @@ app = FastAPI(title="lemon")
 _lock = Lock()
 _session_start = datetime.now()
 _session_id = db.start_session()
-_internal_state = load_state()
+_internal_state = fresh_session_state()
+save_state(_internal_state, session_id=_session_id)
 
 
 def _initial_history() -> list[dict]:

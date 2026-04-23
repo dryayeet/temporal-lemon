@@ -20,6 +20,17 @@ DEFAULT_STATE = {
     "disposition": "warm",      # warm | normal | slightly reserved
 }
 
+# Overrides applied when a NEW session starts. Simulates "picking up the phone
+# to chat" — lemon shouldn't inherit last session's drained energy. The
+# emotional_thread and recent_activity fields are preserved so cross-session
+# continuity (remembering what was on lemon's mind) still works.
+SESSION_START_OVERRIDES = {
+    "mood": "good",
+    "energy": "high",
+    "engagement": "deep",
+    "disposition": "warm",
+}
+
 
 def load_state() -> dict:
     saved = latest_state()
@@ -28,6 +39,15 @@ def load_state() -> dict:
     merged = dict(DEFAULT_STATE)
     merged.update({k: v for k, v in saved.items() if k in DEFAULT_STATE})
     return merged
+
+
+def fresh_session_state() -> dict:
+    """Load the latest snapshot, then re-peg energy/engagement/mood/disposition
+    to an upbeat baseline so every new session starts engaged.
+    Cross-session fields (emotional_thread, recent_activity) carry over."""
+    state = load_state()
+    state.update(SESSION_START_OVERRIDES)
+    return state
 
 
 def save_state(state: dict, session_id: Optional[int] = None) -> None:

@@ -6,7 +6,9 @@ import requests
 import state
 from state import (
     DEFAULT_STATE,
+    SESSION_START_OVERRIDES,
     format_internal_state,
+    fresh_session_state,
     load_state,
     parse_state_response,
     save_state,
@@ -104,6 +106,40 @@ def test_load_fills_missing_keys_from_defaults():
     loaded = load_state()
     assert loaded["mood"] == "good"
     assert loaded["disposition"] == DEFAULT_STATE["disposition"]
+
+
+# ---------- fresh_session_state ----------
+
+def test_fresh_session_on_empty_db_uses_upbeat_baseline():
+    out = fresh_session_state()
+    assert out["energy"] == "high"
+    assert out["engagement"] == "deep"
+    assert out["mood"] == "good"
+    assert out["disposition"] == "warm"
+
+
+def test_fresh_session_overrides_drained_previous_state():
+    drained = dict(DEFAULT_STATE,
+                   mood="tired", energy="low", engagement="low",
+                   disposition="slightly reserved",
+                   emotional_thread="long day",
+                   recent_activity="was talking with the user earlier")
+    save_state(drained)
+
+    out = fresh_session_state()
+    # upbeat overrides applied
+    assert out["energy"] == "high"
+    assert out["engagement"] == "deep"
+    assert out["mood"] == "good"
+    assert out["disposition"] == "warm"
+    # cross-session continuity preserved
+    assert out["emotional_thread"] == "long day"
+    assert out["recent_activity"] == "was talking with the user earlier"
+
+
+def test_session_start_overrides_cover_every_energy_field():
+    # sanity: the override set must touch each field that represents "am I into this"
+    assert set(SESSION_START_OVERRIDES) == {"mood", "energy", "engagement", "disposition"}
 
 
 # ---------- update_internal_state (HTTP mocked) ----------

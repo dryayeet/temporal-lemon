@@ -14,7 +14,7 @@ from pipeline import run_empathy_turn
 from prompt import LEMON_OPENERS, LEMON_PROMPT
 from state import (
     format_internal_state,
-    load_state,
+    fresh_session_state,
     save_state,
     update_internal_state,
 )
@@ -47,7 +47,8 @@ def refresh_base_blocks(ctx: ChatContext, session_start: datetime) -> list[dict]
 def main() -> None:
     session_start = datetime.now()
     session_id = db.start_session()
-    internal_state = load_state()
+    internal_state = fresh_session_state()
+    save_state(internal_state, session_id=session_id)
 
     ctx = ChatContext(
         history=build_initial_history(internal_state, session_start),
