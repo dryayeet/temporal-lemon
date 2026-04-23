@@ -5,41 +5,23 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>lemon</title>
   <style>
+    /* Default: light. Lemon sorbet scoop melting into vanilla ice cream. */
     :root {
-      --bg: #f5f1ea;
-      --panel: #f4e4a8;
-      --chat-bg: #ece6db;
-      --bubble-you: #3f3a33;
-      --bubble-you-text: #faf7f0;
-      --bubble-lemon: #ffffff;
+      --bg: #fdf8e8;
+      --panel: #fbe9a5;
+      --chat-bg: #fbf4dd;
+      --bubble-you: #fae18a;
+      --bubble-you-text: #3a2f1e;
+      --bubble-lemon: #fefaea;
       --bubble-lemon-text: #2a2520;
-      --bubble-system: #e4ddce;
-      --text: #2a2520;
-      --muted: #8a8378;
-      --accent: #c8a020;
-      --border: rgba(63, 58, 51, 0.08);
-      --border-strong: rgba(63, 58, 51, 0.14);
-      --shadow-bubble: 0 4px 12px rgba(63, 58, 51, 0.08);
-      --shadow-panel: 0 1px 2px rgba(63, 58, 51, 0.04);
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg: #1a1612;
-        --panel: #3a2f0d;
-        --chat-bg: #1f1b17;
-        --bubble-you: #e8d89b;
-        --bubble-you-text: #1a1612;
-        --bubble-lemon: #2a251e;
-        --bubble-lemon-text: #eae3d5;
-        --bubble-system: #2d2820;
-        --text: #eae3d5;
-        --muted: #9a8f7f;
-        --accent: #d9a935;
-        --border: rgba(234, 227, 213, 0.08);
-        --border-strong: rgba(234, 227, 213, 0.14);
-        --shadow-bubble: 0 4px 12px rgba(0, 0, 0, 0.3);
-        --shadow-panel: 0 1px 2px rgba(0, 0, 0, 0.2);
-      }
+      --bubble-system: #f3ead1;
+      --text: #3a2f1e;
+      --muted: #a59879;
+      --accent: #d4a33c;
+      --border: rgba(58, 47, 30, 0.08);
+      --border-strong: rgba(58, 47, 30, 0.14);
+      --shadow-bubble: 0 4px 16px rgba(199, 154, 58, 0.14);
+      --shadow-panel: 0 1px 3px rgba(58, 47, 30, 0.05);
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); }
@@ -93,7 +75,44 @@
     .composer button:disabled { opacity: 0.4; cursor: not-allowed; }
     .refresh { background: none; border: 1px solid var(--border-strong); color: var(--muted); padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 11px; }
     .refresh:hover { color: var(--text); }
+    .header-right { display: flex; align-items: center; gap: 10px; }
+    .theme-toggle {
+      background: none; border: 1px solid var(--border-strong); color: var(--muted);
+      width: 30px; height: 30px; border-radius: 50%; cursor: pointer;
+      font-size: 14px; line-height: 1; padding: 0;
+      display: inline-flex; align-items: center; justify-content: center;
+      transition: color 0.15s, background 0.15s, border-color 0.15s;
+    }
+    .theme-toggle:hover { color: var(--text); background: var(--border); border-color: var(--accent); }
+
+    /* Dark mode is opt-in only via the toggle. :root is the default (light). */
+    :root[data-theme="dark"] {
+      --bg: #1a150c;
+      --panel: #2a1f0e;
+      --chat-bg: #1f1a10;
+      --bubble-you: #e8c872;
+      --bubble-you-text: #1a150c;
+      --bubble-lemon: #2a2419;
+      --bubble-lemon-text: #f5ecd3;
+      --bubble-system: #20180d;
+      --text: #f5ecd3;
+      --muted: #a8957a;
+      --accent: #e8c872;
+      --border: rgba(245, 236, 211, 0.08);
+      --border-strong: rgba(245, 236, 211, 0.14);
+      --shadow-bubble: 0 4px 16px rgba(0, 0, 0, 0.35);
+      --shadow-panel: 0 1px 3px rgba(0, 0, 0, 0.25);
+    }
   </style>
+  <script>
+    // applied before body paints so saved theme doesn't flash on load
+    (function () {
+      var saved = localStorage.getItem("lemon-theme");
+      if (saved === "light" || saved === "dark") {
+        document.documentElement.setAttribute("data-theme", saved);
+      }
+    })();
+  </script>
 </head>
 <body>
   <aside class="sidebar">
@@ -108,7 +127,10 @@
   <div class="main">
     <div class="header">
       <h1>🍋 lemon</h1>
-      <div class="hint">type <code>/help</code> for commands</div>
+      <div class="header-right">
+        <div class="hint">type <code>/help</code> for commands</div>
+        <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="toggle light/dark" aria-label="toggle theme">☾</button>
+      </div>
     </div>
     <div class="messages" id="messages"></div>
     <div class="composer">
@@ -122,6 +144,28 @@
     const messagesEl = $("messages");
     const inputEl = $("input");
     const sendBtn = $("send");
+
+    // ---- theme toggle ----
+    function currentTheme() {
+      const forced = document.documentElement.getAttribute("data-theme");
+      if (forced === "dark") return "dark";
+      return "light";  // default regardless of OS preference
+    }
+    function applyTheme(theme) {
+      document.documentElement.setAttribute("data-theme", theme);
+      const btn = $("theme-toggle");
+      if (btn) btn.textContent = theme === "dark" ? "☀" : "☾";
+    }
+    function toggleTheme() {
+      const next = currentTheme() === "dark" ? "light" : "dark";
+      localStorage.setItem("lemon-theme", next);
+      applyTheme(next);
+    }
+    // sync the toggle icon to whatever theme is already active at paint time
+    (function syncToggleIcon() {
+      const btn = $("theme-toggle");
+      if (btn) btn.textContent = currentTheme() === "dark" ? "☀" : "☾";
+    })();
 
     function bubble(role, text) {
       const cls = role === "user" ? "you" : role === "assistant" ? "lemon" : "system";
