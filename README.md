@@ -85,6 +85,8 @@ docs/               architecture, slash commands, db schema, web UI, empathy res
 
 ## Documentation
 
+- [`docs/TECHNICAL.md`](docs/TECHNICAL.md) — full technical reference: every module, every call path, every system block, every knob
+- [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) — how to evaluate lemon: ceiling vs stack-lift tests, EQ-Bench 3 / HEART / CES-LCC recipes, pipeline ON vs OFF
 - [`docs/architecture.md`](docs/architecture.md) — how all the pieces fit, per-turn pipeline diagram
 - [`docs/slash_commands.md`](docs/slash_commands.md) — command reference (`/help`, `/why`, `/empathy`, ...)
 - [`docs/web_ui.md`](docs/web_ui.md) — endpoints + SSE protocol
