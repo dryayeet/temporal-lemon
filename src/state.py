@@ -26,8 +26,8 @@ DEFAULT_STATE = {
 # continuity (remembering what was on lemon's mind) still works.
 SESSION_START_OVERRIDES = {
     "mood": "good",
-    "energy": "high",
-    "engagement": "deep",
+    "energy": "medium",
+    "engagement": "normal",
     "disposition": "warm",
 }
 
