@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import random
+import threading
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
@@ -19,19 +20,16 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+import config
 import db
 from commands import ChatContext, dispatch, is_command
-from config import CHAT_MODEL, KEEP_RECENT_TURNS, STATE_UPDATE_EVERY
+from config import CHAT_MODEL, KEEP_RECENT_TURNS
 from facts import FACTS_TAG, format_user_facts
 from history import replace_system_block
-from pipeline import run_empathy_turn
+from pipeline import recent_messages_for_context, run_empathy_turn
+from post_exchange import bookkeep
 from prompt import LEMON_OPENERS, LEMON_PROMPT
-from state import (
-    format_internal_state,
-    fresh_session_state,
-    save_state,
-    update_internal_state,
-)
+from state import format_internal_state, fresh_session_state, save_state
 from time_context import get_time_context
 
 app = FastAPI(title="lemon")
@@ -64,7 +62,6 @@ _ctx = ChatContext(
     chat_model=CHAT_MODEL,
     session_id=_session_id,
 )
-_exchange_count = 0
 
 # greet on startup so the UI has something to render on first paint
 _first = random.choice(LEMON_OPENERS)
@@ -115,12 +112,9 @@ def chat(req: ChatRequest) -> StreamingResponse:
 
 
 def _stream_reply(user_msg: str) -> Iterator[bytes]:
-    """SSE generator: emit phase events, then run the pipeline, then replay tokens."""
-    global _exchange_count
-
-    # phase events are buffered into this list by the on_phase callback so we
-    # can yield them between pipeline steps. Async would be cleaner; this is
-    # simpler and the steps are short.
+    """SSE generator: emit phase events, then run the pipeline, then deliver
+    the reply. Fact + state bookkeeping fires AFTER `done` in a daemon thread
+    so the user never waits on it."""
     phase_queue: list[str] = []
 
     def push_phase(phase: str) -> None:
@@ -155,13 +149,57 @@ def _stream_reply(user_msg: str) -> Iterator[bytes]:
         _ctx.last_trace = trace
         _ctx.history.append({"role": "user", "content": user_msg})
         _ctx.history.append({"role": "assistant", "content": reply})
-        _exchange_count += 1
-        if _exchange_count % STATE_UPDATE_EVERY == 0:
-            _ctx.internal_state = update_internal_state(_ctx.internal_state, user_msg, reply)
-            save_state(_ctx.internal_state, session_id=_session_id)
+        # snapshot inputs the bookkeeping thread will need; take them now while
+        # we hold the lock so they stay consistent with the history we just appended.
+        recent_snapshot = recent_messages_for_context(_ctx.history)
+        state_snapshot = dict(_ctx.internal_state)
+        model_snapshot = _ctx.chat_model
 
     yield _sse("token", reply)
     yield _sse("done", reply)
+
+    threading.Thread(
+        target=_run_bookkeeping,
+        args=(user_msg, reply, trace, recent_snapshot, state_snapshot, model_snapshot),
+        daemon=True,
+    ).start()
+
+
+def _run_bookkeeping(
+    user_msg: str,
+    reply: str,
+    trace,
+    recent_snapshot: list[dict],
+    state_snapshot: dict,
+    model: str,
+) -> None:
+    """Run the merged fact+state bookkeeping call, then apply its results.
+
+    Failures are swallowed so a bad bookkeep never affects the user-visible
+    reply (which already shipped) or subsequent turns.
+    """
+    try:
+        existing = db.get_facts()
+        new_facts, new_state = bookkeep(
+            user_msg=user_msg,
+            bot_reply=reply,
+            existing_facts=existing,
+            current_state=state_snapshot,
+            recent_msgs=recent_snapshot,
+            model=model,
+            max_new=config.AUTO_FACTS_MAX_PER_TURN,
+        ) if config.ENABLE_AUTO_FACTS else ({}, state_snapshot)
+
+        with _lock:
+            for k, v in list(new_facts.items())[:config.AUTO_FACTS_MAX_PER_TURN]:
+                db.upsert_fact(k, v, source_session_id=_session_id)
+            _ctx.internal_state = new_state
+            save_state(new_state, session_id=_session_id)
+            # surface the extracted facts on the trace so /trace and /why
+            # still report them (albeit after a short delay).
+            trace.facts_extracted = new_facts
+    except Exception as e:
+        print(f"  [bookkeeping thread failed: {e}]")
 
 
 def _sse(event: str, data: str) -> bytes:

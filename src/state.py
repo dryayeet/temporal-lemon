@@ -1,14 +1,13 @@
-"""Internal-state lifecycle: defaults, parsing, formatting, persistence, updater.
+"""Internal-state lifecycle: defaults, parsing, formatting, persistence.
 
 State persists in SQLite (see db.py). The chat loop loads the latest snapshot
-on startup and saves a new snapshot every time the state changes.
+on startup and saves a new snapshot every time the state changes. The LLM
+call that nudges the state lives in `post_exchange.py` now (merged with
+fact extraction into a single post-generation round-trip).
 """
 import json
 from typing import Optional
 
-import requests
-
-from config import OPENROUTER_HEADERS, OPENROUTER_URL, STATE_MODEL
 from db import latest_state, save_state_snapshot
 
 DEFAULT_STATE = {
@@ -91,51 +90,3 @@ def parse_state_response(raw: str, fallback: dict) -> dict:
     return {k: updated.get(k, fallback[k]) for k in DEFAULT_STATE}
 
 
-def update_internal_state(state: dict, user_msg: str, bot_reply: str) -> dict:
-    """Ask a lightweight model to nudge the internal state based on the latest exchange."""
-    prompt = f"""
-You are managing the internal emotional state of a chatbot that simulates a human friend.
-
-Current state:
-{json.dumps(state, indent=2)}
-
-What just happened in the conversation:
-User said: "{user_msg}"
-Bot replied: "{bot_reply}"
-
-Based on this exchange, suggest small, realistic updates to the internal state.
-Rules:
-- Changes should be subtle nudges, not dramatic shifts.
-- Only change fields where the conversation genuinely warrants it.
-- mood and energy shift slowly. A single message rarely changes them much.
-- engagement should reflect how present and interested the user seems right now.
-- emotional_thread should capture anything that seems to be on the bot's mind after this exchange. Can be null.
-- recent_activity should only be set if the conversation has causally established something the bot has been doing. Do not invent.
-- disposition shifts only if the user's tone or behavior warrants it.
-
-Respond ONLY with a valid JSON object with the same keys as the current state. No explanation. No markdown.
-"""
-
-    try:
-        response = requests.post(
-            OPENROUTER_URL,
-            headers=OPENROUTER_HEADERS,
-            json={
-                "model": STATE_MODEL,
-                "temperature": 0.3,
-                "max_tokens": 400,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        raw = response.json()["choices"][0]["message"]["content"]
-        return parse_state_response(raw, fallback=state)
-
-    except requests.HTTPError as e:
-        body = getattr(e.response, "text", "")[:400]
-        print(f"  [state update http error: {e} | body: {body}]")
-        return state
-    except (requests.RequestException, json.JSONDecodeError, ValueError, KeyError) as e:
-        print(f"  [state update failed: {e}]")
-        return state

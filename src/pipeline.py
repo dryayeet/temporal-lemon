@@ -1,9 +1,13 @@
 """Empathy pipeline orchestrator.
 
 Per turn:
-    classify emotion → retrieve relevant memories → theory-of-mind side pass
+    merged read (emotion + theory-of-mind, one LLM call) → retrieve memories
     → inject system blocks → generate draft → sentiment-mirror check
     → regenerate-once on failure → return final reply + trace.
+
+Post-exchange bookkeeping (fact extraction + state nudge) no longer runs
+inside the pipeline — callers run it in a background thread after the reply
+has been delivered, so the user never waits on it. See `post_exchange.py`.
 
 The CLI and web entry points both call `run_empathy_turn`. When the empathy
 pipeline is disabled (`config.ENABLE_EMPATHY_PIPELINE = False`), this becomes
@@ -16,24 +20,26 @@ from typing import Callable, Optional
 
 import config
 import db
-import fact_extractor
 from chat import generate_reply
-from emotion import EMOTION_TAG, classify_emotion, format_emotion_block
+from emotion import EMOTION_TAG, format_emotion_block
 from empathy_check import CheckResult, check_response
 from history import compress_history
 from memory import MEMORY_TAG, format_memory_block, relevant_memories
-from tom import TOM_TAG, format_tom_block, theory_of_mind
+from tom import TOM_TAG, format_tom_block
+from user_read import read_user
 
 CRITIQUE_TAG = "<empathy_retry>"
 
 # Phase labels used by the SSE relay so the web UI can show "lemon is reading
-# you...", "...thinking...", etc. CLI ignores them by default.
+# you...", etc. CLI ignores them by default.
+#
+# THINKING was merged into READING when emotion+ToM collapsed into one call.
+# NOTING was dropped when fact/state bookkeeping moved to a background thread
+# that fires AFTER the reply is delivered.
 PHASE_READING = "reading you"
 PHASE_REMEMBERING = "remembering"
-PHASE_THINKING = "thinking"
 PHASE_REPLYING = "replying"
 PHASE_REVISING = "rephrasing"
-PHASE_NOTING = "making a note"
 
 
 @dataclass
@@ -73,6 +79,11 @@ def _recent_messages_for_context(history: list[dict], n: int = 6) -> list[dict]:
     """Pull the last n non-system messages out of `history` to give classifiers context."""
     convo = [m for m in history if m["role"] != "system"]
     return convo[-n:]
+
+
+# Public alias so callers (web.py, lem.py) can share the same recent-msgs
+# view when they build the bookkeeping payload in their background thread.
+recent_messages_for_context = _recent_messages_for_context
 
 
 def run_empathy_turn(
@@ -115,11 +126,12 @@ def run_empathy_turn(
     trace.pipeline_used = True
     recent = _recent_messages_for_context(base_history)
 
-    # ---------- 1. classify emotion ----------
+    # ---------- 1. merged read: emotion + theory-of-mind in one call ----------
     if on_phase:
         on_phase(PHASE_READING)
-    emotion = classify_emotion(user_msg, recent_msgs=recent, model=model)
+    emotion, tom = read_user(user_msg, recent_msgs=recent, model=model)
     trace.emotion = emotion
+    trace.tom = tom
 
     # log the user message NOW with its emotion fields
     if session_id is not None:
@@ -130,7 +142,7 @@ def run_empathy_turn(
             salience=emotion.get("intensity"),
         )
 
-    # ---------- 2. retrieve memories ----------
+    # ---------- 2. retrieve memories (DB only, no LLM) ----------
     if on_phase:
         on_phase(PHASE_REMEMBERING)
     memories = relevant_memories(
@@ -139,12 +151,6 @@ def run_empathy_turn(
         limit=config.MEMORY_RETRIEVAL_LIMIT,
     )
     trace.memories = memories
-
-    # ---------- 3. ToM pass ----------
-    if on_phase:
-        on_phase(PHASE_THINKING)
-    tom = theory_of_mind(user_msg, emotion=emotion, recent_msgs=recent, model=model)
-    trace.tom = tom
 
     # ---------- 4. inject blocks + draft ----------
     history = list(base_history)
@@ -182,28 +188,9 @@ def run_empathy_turn(
         db.log_message(session_id, "assistant", final)
     trace.final = final
 
-    # ---------- 6. fact extraction ----------
-    # Wrapped in a broad try/except so any extractor bug degrades silently to
-    # "no facts this turn" rather than breaking the reply that already shipped.
-    if config.ENABLE_AUTO_FACTS and session_id is not None:
-        if on_phase:
-            on_phase(PHASE_NOTING)
-        try:
-            existing = db.get_facts()
-            extracted = fact_extractor.extract_facts(
-                user_msg=user_msg,
-                bot_reply=final,
-                existing_facts=existing,
-                recent_msgs=recent,
-                model=model,
-                max_new=config.AUTO_FACTS_MAX_PER_TURN,
-            )
-            for k, v in list(extracted.items())[:config.AUTO_FACTS_MAX_PER_TURN]:
-                db.upsert_fact(k, v, source_session_id=session_id)
-            trace.facts_extracted = extracted
-        except Exception as e:
-            print(f"  [fact extraction step failed: {e}]")
-
+    # Post-exchange bookkeeping (facts + state nudge) runs OUTSIDE the pipeline
+    # in a background thread — see web.py / lem.py. Pipeline returns now so
+    # the caller can deliver the reply to the user immediately.
     return final, trace
 
 

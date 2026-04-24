@@ -22,7 +22,9 @@ _default_cache = "1" if CHAT_MODEL.startswith("anthropic/") else "0"
 ENABLE_PROMPT_CACHE = os.getenv("LEMON_PROMPT_CACHE", _default_cache) not in ("0", "false", "no")
 
 # --- BEHAVIOR KNOBS ---
-STATE_UPDATE_EVERY = 2        # run the state updater every N exchanges
+# State updates now happen every turn inside the merged post-exchange call
+# (see post_exchange.py). The prompt itself enforces "subtle nudges only",
+# so per-turn cadence does not cause drift.
 KEEP_RECENT_TURNS = 8         # recent turns kept verbatim before compression
 
 # --- EMPATHY PIPELINE ---

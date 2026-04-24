@@ -1,16 +1,12 @@
-"""Pre-generation emotion classifier.
+"""Emotion schema + parser + system-block formatter.
 
-One cheap LLM call per turn (default model: STATE_MODEL — Haiku). Reads the
-user's latest message + a few prior turns, returns a structured estimate of
-their emotional state. The result is injected as a `<user_emotion>` system
-block and stored on the message row in the db.
+The LLM call itself now lives in `user_read.py` (merged with theory-of-mind
+into a single pre-generation round-trip). This module keeps the label
+whitelist, the validator (`_parse`), the default shape, and the
+`<user_emotion>` system-block formatter — all of which user_read and the
+pipeline still consume.
 """
 import json
-from typing import Optional
-
-import requests
-
-from config import OPENROUTER_HEADERS, OPENROUTER_URL, STATE_MODEL
 
 EMOTION_TAG = "<user_emotion>"
 
@@ -31,36 +27,6 @@ DEFAULT_EMOTION = {
     "underlying_need": None,
     "undertones": [],
 }
-
-
-def _build_prompt(user_msg: str, recent_msgs: Optional[list[dict]]) -> str:
-    context_lines = []
-    if recent_msgs:
-        for m in recent_msgs[-4:]:
-            role = "Them" if m["role"] == "user" else "You (lemon)"
-            context_lines.append(f"{role}: {m['content']}")
-    context = "\n".join(context_lines) if context_lines else "(no prior turns)"
-
-    label_csv = ", ".join(EMOTION_LABELS)
-    return f"""
-You read the user's latest message and infer their emotional state. You are NOT replying to them — only classifying.
-
-Recent conversation:
-{context}
-
-Latest user message:
-"{user_msg}"
-
-Return a JSON object with these keys:
-- "primary": one of [{label_csv}]
-- "intensity": float between 0.0 (very mild) and 1.0 (very strong)
-- "underlying_need": short string describing what they probably want from the next reply (e.g. "feel heard, not solved", "be distracted", "get a straight answer"), or null if unclear
-- "undertones": list of zero to three secondary emotions from the same label set
-
-Be honest. If the message is flat small-talk, "neutral" with low intensity is the right answer. Do not over-pathologize.
-
-Respond with ONLY the JSON object. No explanation, no markdown.
-""".strip()
 
 
 def _parse(raw: str) -> dict:
@@ -105,38 +71,6 @@ def _parse(raw: str) -> dict:
         "underlying_need": need,
         "undertones": undertones,
     }
-
-
-def classify_emotion(
-    user_msg: str,
-    recent_msgs: Optional[list[dict]] = None,
-    model: Optional[str] = None,
-) -> dict:
-    """Return a structured emotion dict for `user_msg`. Falls back to DEFAULT_EMOTION on any failure."""
-    prompt = _build_prompt(user_msg, recent_msgs)
-    try:
-        response = requests.post(
-            OPENROUTER_URL,
-            headers=OPENROUTER_HEADERS,
-            json={
-                "model": model or STATE_MODEL,
-                "temperature": 0.2,
-                "max_tokens": 250,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=20,
-        )
-        response.raise_for_status()
-        raw = response.json()["choices"][0]["message"]["content"]
-        return _parse(raw)
-
-    except requests.HTTPError as e:
-        body = getattr(e.response, "text", "")[:300]
-        print(f"  [emotion classifier http error: {e} | body: {body}]")
-        return dict(DEFAULT_EMOTION)
-    except (requests.RequestException, json.JSONDecodeError, ValueError, KeyError) as e:
-        print(f"  [emotion classifier failed: {e}]")
-        return dict(DEFAULT_EMOTION)
 
 
 def format_emotion_block(emotion: dict) -> str:
