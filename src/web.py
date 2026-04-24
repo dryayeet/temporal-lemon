@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import random
-import time
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
@@ -21,7 +20,6 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 import db
-from chat import humanize_delay, re_split_keep_whitespace
 from commands import ChatContext, dispatch, is_command
 from config import CHAT_MODEL, KEEP_RECENT_TURNS, STATE_UPDATE_EVERY
 from facts import FACTS_TAG, format_user_facts
@@ -130,7 +128,6 @@ def _stream_reply(user_msg: str) -> Iterator[bytes]:
 
     with _lock:
         base_history = _refresh_base_blocks()
-        energy = _ctx.internal_state.get("energy", "medium")
         model = _ctx.chat_model
 
     try:
@@ -140,7 +137,6 @@ def _stream_reply(user_msg: str) -> Iterator[bytes]:
         reply, trace = run_empathy_turn(
             user_msg=user_msg,
             base_history=base_history,
-            energy=energy,
             model=model,
             session_id=_session_id,
             keep_recent_turns=KEEP_RECENT_TURNS,
@@ -164,11 +160,7 @@ def _stream_reply(user_msg: str) -> Iterator[bytes]:
             _ctx.internal_state = update_internal_state(_ctx.internal_state, user_msg, reply)
             save_state(_ctx.internal_state, session_id=_session_id)
 
-    # replay the buffered reply token-by-token with humanized pacing
-    for chunk in re_split_keep_whitespace(reply):
-        yield _sse("token", chunk)
-        time.sleep(humanize_delay(chunk, energy))
-
+    yield _sse("token", reply)
     yield _sse("done", reply)
 
 

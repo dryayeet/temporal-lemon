@@ -5,7 +5,6 @@ from datetime import datetime
 import requests
 
 import db
-from chat import play_tokens
 from commands import ChatContext, dispatch, is_command
 from config import CHAT_MODEL, KEEP_RECENT_TURNS, STATE_UPDATE_EVERY
 from facts import FACTS_TAG, format_user_facts
@@ -88,7 +87,6 @@ def main() -> None:
                 reply, trace = run_empathy_turn(
                     user_msg=user_input,
                     base_history=base_history,
-                    energy=ctx.internal_state.get("energy", "medium"),
                     model=ctx.chat_model,
                     session_id=session_id,
                     keep_recent_turns=KEEP_RECENT_TURNS,
@@ -102,7 +100,7 @@ def main() -> None:
             ctx.history.append({"role": "user", "content": user_input})
             ctx.history.append({"role": "assistant", "content": reply})
 
-            play_tokens(reply, energy=ctx.internal_state.get("energy", "medium"))
+            print(f"lemon: {reply}\n")
 
             exchange_count += 1
             if exchange_count % STATE_UPDATE_EVERY == 0:

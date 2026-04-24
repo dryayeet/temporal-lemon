@@ -34,11 +34,6 @@ MEMORY_RETRIEVAL_LIMIT = int(os.getenv("LEMON_MEMORY_LIMIT", "3"))
 ENABLE_AUTO_FACTS = os.getenv("LEMON_AUTO_FACTS", "1") not in ("0", "false", "no")
 AUTO_FACTS_MAX_PER_TURN = int(os.getenv("LEMON_AUTO_FACTS_MAX", "3"))
 
-# Streaming "human typing" pacing: base seconds/token, scaled by energy
-HUMANIZE_STREAM = os.getenv("LEMON_HUMANIZE", "1") not in ("0", "false", "no")
-HUMANIZE_BASE_SECONDS = 0.018       # mid-energy default
-HUMANIZE_PUNCT_PAUSE = 0.18         # extra pause after . ! ? ,
-
 # --- PATHS ---
 # Relative paths are resolved against the project root (one level above src/).
 # Without this, sqlite writes depend on process CWD and split the DB across

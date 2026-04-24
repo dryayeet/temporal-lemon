@@ -1,7 +1,5 @@
-"""Chat-completion call: prompt caching, streaming, humanized output pacing."""
+"""Chat-completion call: prompt caching and streaming."""
 import json
-import random
-import time
 from typing import Iterable, Iterator, Optional
 
 import requests
@@ -13,12 +11,6 @@ from config import OPENROUTER_HEADERS, OPENROUTER_URL
 # long (~5KB) and stable across turns — perfect cache hit. Time/state blocks
 # change every turn and stay uncached.
 PERSONA_TAG = "<Who you are>"
-
-ENERGY_SPEED_MULT = {
-    "low": 1.45,
-    "medium": 1.0,
-    "high": 0.7,
-}
 
 
 def _wrap_for_cache(content: str) -> list[dict]:
@@ -46,18 +38,6 @@ def prepare_messages(history: list[dict]) -> list[dict]:
         else:
             out.append(msg)
     return out
-
-
-def humanize_delay(token: str, energy: str) -> float:
-    """Return seconds to sleep after `token`. Zero if humanizing is disabled."""
-    if not config.HUMANIZE_STREAM:
-        return 0.0
-    mult = ENERGY_SPEED_MULT.get(energy, 1.0)
-    base = config.HUMANIZE_BASE_SECONDS * mult
-    delay = base * random.uniform(0.5, 1.5)
-    if token and token[-1] in ".!?,":
-        delay += config.HUMANIZE_PUNCT_PAUSE * mult * random.uniform(0.7, 1.3)
-    return delay
 
 
 def iter_chat(history: list[dict], model: Optional[str] = None) -> Iterator[str]:
@@ -94,49 +74,17 @@ def generate_reply(history: list[dict], model: Optional[str] = None) -> str:
     return "".join(iter_chat(history, model=model))
 
 
-def play_tokens(text: str, energy: str = "medium", prefix: str = "lemon: ") -> None:
-    """Print `text` to stdout one chunk at a time with humanized pacing.
-
-    Used to "replay" a buffered reply so the user still sees a typing rhythm,
-    even though generation already completed. Splits on whitespace so the
-    pacing has token-sized units to act on.
-    """
-    print(prefix, end="", flush=True)
-    for chunk in re_split_keep_whitespace(text):
-        print(chunk, end="", flush=True)
-        time.sleep(humanize_delay(chunk, energy))
-    print("\n")
-
-
-def re_split_keep_whitespace(text: str) -> list[str]:
-    """Split on whitespace boundaries while keeping the whitespace attached to the prior token."""
-    out: list[str] = []
-    buf = ""
-    for ch in text:
-        buf += ch
-        if ch.isspace():
-            out.append(buf)
-            buf = ""
-    if buf:
-        out.append(buf)
-    return out
-
-
 def stream_chat(
     history: list[dict],
     energy: str = "medium",
     model: Optional[str] = None,
 ) -> str:
-    """CLI helper: stream `history` to stdout with humanized pacing, return the full reply.
-
-    Kept for callers that don't want the full buffer-then-replay pipeline.
-    """
+    """CLI helper: stream `history` to stdout, return the full reply."""
     print("lemon: ", end="", flush=True)
     chunks: list[str] = []
     for delta in iter_chat(history, model=model):
         print(delta, end="", flush=True)
         chunks.append(delta)
-        time.sleep(humanize_delay(delta, energy))
     print("\n")
     return "".join(chunks)
 

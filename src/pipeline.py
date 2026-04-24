@@ -78,7 +78,6 @@ def _recent_messages_for_context(history: list[dict], n: int = 6) -> list[dict]:
 def run_empathy_turn(
     user_msg: str,
     base_history: list[dict],
-    energy: str = "medium",
     model: Optional[str] = None,
     session_id: Optional[int] = None,
     keep_recent_turns: Optional[int] = None,
