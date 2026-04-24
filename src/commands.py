@@ -213,12 +213,7 @@ def _why(ctx: ChatContext, args: str) -> CommandResult:
 
 
 @command("quit", "exit the chat (alias: /exit)")
+@command("exit", "exit the chat (alias: /quit)")
 def _quit(ctx: ChatContext, args: str) -> CommandResult:
-    ctx.exit_requested = True
-    return CommandResult("bye.")
-
-
-@command("exit", "exit the chat")
-def _exit(ctx: ChatContext, args: str) -> CommandResult:
     ctx.exit_requested = True
     return CommandResult("bye.")

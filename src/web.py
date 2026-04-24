@@ -20,17 +20,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-import config
 import db
 from commands import ChatContext, dispatch, is_command
 from config import CHAT_MODEL, KEEP_RECENT_TURNS
-from facts import FACTS_TAG, format_user_facts
-from history import replace_system_block
 from pipeline import recent_messages_for_context, run_empathy_turn
-from post_exchange import bookkeep
-from prompt import LEMON_OPENERS, LEMON_PROMPT
-from state import format_internal_state, fresh_session_state, save_state
-from time_context import get_time_context
+from prompt import LEMON_OPENERS
+from session_context import initial_history, refresh_base_blocks, run_bookkeeping
+from state import fresh_session_state, save_state
 
 app = FastAPI(title="lemon")
 
@@ -43,21 +39,8 @@ _session_id = db.start_session()
 _internal_state = fresh_session_state()
 save_state(_internal_state, session_id=_session_id)
 
-
-def _initial_history() -> list[dict]:
-    h = [
-        {"role": "system", "content": LEMON_PROMPT},
-        {"role": "system", "content": get_time_context(_session_start)},
-        {"role": "system", "content": format_internal_state(_internal_state)},
-    ]
-    facts_block = format_user_facts(db.get_facts())
-    if facts_block:
-        h.append({"role": "system", "content": facts_block})
-    return h
-
-
 _ctx = ChatContext(
-    history=_initial_history(),
+    history=initial_history(_internal_state, _session_start),
     internal_state=_internal_state,
     chat_model=CHAT_MODEL,
     session_id=_session_id,
@@ -68,15 +51,8 @@ _first = random.choice(LEMON_OPENERS)
 _ctx.history.append({"role": "assistant", "content": _first})
 db.log_message(_session_id, "assistant", _first)
 
-
-def _refresh_base_blocks() -> list[dict]:
-    h = list(_ctx.history)
-    h = replace_system_block(h, "<time_context>", get_time_context(_session_start), position=1)
-    h = replace_system_block(h, "<internal_state>", format_internal_state(_ctx.internal_state), position=2)
-    facts_block = format_user_facts(db.get_facts())
-    if facts_block:
-        h = replace_system_block(h, FACTS_TAG, facts_block, position=3)
-    return h
+# The HTML template is static; read it once at import instead of on every GET.
+_INDEX_HTML = (Path(__file__).parent / "templates" / "index.html").read_text(encoding="utf-8")
 
 
 # ---------- request models ----------
@@ -93,8 +69,7 @@ class CommandRequest(BaseModel):
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
-    html_path = Path(__file__).parent / "templates" / "index.html"
-    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+    return HTMLResponse(_INDEX_HTML)
 
 
 # ---------- chat (SSE) ----------
@@ -121,12 +96,16 @@ def _stream_reply(user_msg: str) -> Iterator[bytes]:
         phase_queue.append(phase)
 
     with _lock:
-        base_history = _refresh_base_blocks()
+        base_history = refresh_base_blocks(_ctx.history, _ctx.internal_state, _session_start)
         model = _ctx.chat_model
 
     try:
-        # we yield the first phase immediately so the UI sees "lemon is reading you..."
+        # yield the first phase immediately so the UI has something to render
+        # while run_empathy_turn blocks. Pipeline phases are buffered in
+        # phase_queue and flushed below, deduping consecutive repeats so we
+        # don't re-emit "reading you" when the pipeline happens to start there.
         yield _sse("phase", "reading you")
+        last_phase = "reading you"
 
         reply, trace = run_empathy_turn(
             user_msg=user_msg,
@@ -137,9 +116,11 @@ def _stream_reply(user_msg: str) -> Iterator[bytes]:
             on_phase=push_phase,
         )
 
-        # flush queued phase events (skipping the first which we already sent)
-        for phase in phase_queue[1:]:
+        for phase in phase_queue:
+            if phase == last_phase:
+                continue
             yield _sse("phase", phase)
+            last_phase = phase
 
     except (requests.RequestException, RuntimeError) as e:
         yield _sse("error", str(e))
@@ -159,47 +140,13 @@ def _stream_reply(user_msg: str) -> Iterator[bytes]:
     yield _sse("done", reply)
 
     threading.Thread(
-        target=_run_bookkeeping,
-        args=(user_msg, reply, trace, recent_snapshot, state_snapshot, model_snapshot),
+        target=run_bookkeeping,
+        args=(
+            _ctx, _session_id, user_msg, reply, trace,
+            recent_snapshot, state_snapshot, model_snapshot, _lock,
+        ),
         daemon=True,
     ).start()
-
-
-def _run_bookkeeping(
-    user_msg: str,
-    reply: str,
-    trace,
-    recent_snapshot: list[dict],
-    state_snapshot: dict,
-    model: str,
-) -> None:
-    """Run the merged fact+state bookkeeping call, then apply its results.
-
-    Failures are swallowed so a bad bookkeep never affects the user-visible
-    reply (which already shipped) or subsequent turns.
-    """
-    try:
-        existing = db.get_facts()
-        new_facts, new_state = bookkeep(
-            user_msg=user_msg,
-            bot_reply=reply,
-            existing_facts=existing,
-            current_state=state_snapshot,
-            recent_msgs=recent_snapshot,
-            model=model,
-            max_new=config.AUTO_FACTS_MAX_PER_TURN,
-        ) if config.ENABLE_AUTO_FACTS else ({}, state_snapshot)
-
-        with _lock:
-            for k, v in list(new_facts.items())[:config.AUTO_FACTS_MAX_PER_TURN]:
-                db.upsert_fact(k, v, source_session_id=_session_id)
-            _ctx.internal_state = new_state
-            save_state(new_state, session_id=_session_id)
-            # surface the extracted facts on the trace so /trace and /why
-            # still report them (albeit after a short delay).
-            trace.facts_extracted = new_facts
-    except Exception as e:
-        print(f"  [bookkeeping thread failed: {e}]")
 
 
 def _sse(event: str, data: str) -> bytes:

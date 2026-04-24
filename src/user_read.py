@@ -1,14 +1,9 @@
 """Merged pre-generation read: one LLM call covering emotion + theory-of-mind.
 
-Replaces the old pair of `emotion.classify_emotion` + `tom.theory_of_mind`
-round-trips with a single STATE_MODEL call. The model reads the user's
-message and emits a JSON object with two sub-dicts that match the exact
-shape those two functions used to return independently — so downstream
-(pipeline injection, db logging, trace) sees no schema change.
-
-Parsing delegates to `emotion._parse` and `tom._parse` via a re-dump, which
-preserves every validation rule (label whitelist, intensity clamp, etc.)
-without duplicating it here.
+Replaces the old pair of separate emotion and ToM round-trips with a single
+STATE_MODEL call. The model emits a JSON object with two sub-dicts that
+match the exact shapes `emotion._validate` and `tom._validate` enforce, so
+downstream (pipeline injection, db logging, trace) sees no schema change.
 """
 from __future__ import annotations
 
@@ -18,18 +13,13 @@ from typing import Optional
 import requests
 
 from config import OPENROUTER_HEADERS, OPENROUTER_URL, STATE_MODEL
-from emotion import DEFAULT_EMOTION, EMOTION_LABELS, _parse as _parse_emotion
-from tom import DEFAULT_TOM, _parse as _parse_tom
+from emotion import DEFAULT_EMOTION, EMOTION_LABELS, _validate as _validate_emotion
+from parse_utils import format_recent_for_prompt, strip_json_fences
+from tom import DEFAULT_TOM, _validate as _validate_tom
 
 
 def _build_prompt(user_msg: str, recent_msgs: Optional[list[dict]]) -> str:
-    context_lines: list[str] = []
-    if recent_msgs:
-        for m in recent_msgs[-6:]:
-            role = "Them" if m["role"] == "user" else "You (lemon)"
-            context_lines.append(f"{role}: {m['content']}")
-    context = "\n".join(context_lines) if context_lines else "(no prior turns)"
-
+    context = format_recent_for_prompt(recent_msgs)
     label_csv = ", ".join(EMOTION_LABELS)
     return f"""
 You read the user's latest message and produce TWO pieces of private context for the responder. You are NOT replying to the user.
@@ -59,15 +49,6 @@ Respond with ONLY the JSON object. No explanation, no markdown.
 """.strip()
 
 
-def _strip_fences(raw: str) -> str:
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    return raw.strip()
-
-
 def read_user(
     user_msg: str,
     recent_msgs: Optional[list[dict]] = None,
@@ -75,7 +56,7 @@ def read_user(
 ) -> tuple[dict, dict]:
     """Single STATE_MODEL round-trip. Returns (emotion_dict, tom_dict).
 
-    Falls back to (DEFAULT_EMOTION, DEFAULT_TOM) on any failure, so the
+    Falls back to (DEFAULT_EMOTION, DEFAULT_TOM) on any failure so the
     pipeline can always proceed.
     """
     prompt = _build_prompt(user_msg, recent_msgs)
@@ -94,22 +75,15 @@ def read_user(
         response.raise_for_status()
         raw = response.json()["choices"][0]["message"]["content"]
 
-        parsed = json.loads(_strip_fences(raw))
+        parsed = json.loads(strip_json_fences(raw))
         if not isinstance(parsed, dict):
             raise ValueError("user_read response was not a JSON object")
 
-        emo_sub = parsed.get("emotion") or {}
-        tom_sub = parsed.get("tom") or {}
-        if not isinstance(emo_sub, dict):
-            emo_sub = {}
-        if not isinstance(tom_sub, dict):
-            tom_sub = {}
+        emo_sub = parsed.get("emotion") if isinstance(parsed.get("emotion"), dict) else {}
+        tom_sub = parsed.get("tom") if isinstance(parsed.get("tom"), dict) else {}
 
-        # Re-serialize each half and delegate to the existing validators so
-        # every rule (label whitelist, intensity clamp, short-string coercion)
-        # is preserved without duplication.
-        emotion = _parse_emotion(json.dumps(emo_sub)) if emo_sub else dict(DEFAULT_EMOTION)
-        tom = _parse_tom(json.dumps(tom_sub)) if tom_sub else dict(DEFAULT_TOM)
+        emotion = _validate_emotion(emo_sub) if emo_sub else dict(DEFAULT_EMOTION)
+        tom = _validate_tom(tom_sub) if tom_sub else dict(DEFAULT_TOM)
         return emotion, tom
 
     except requests.HTTPError as e:

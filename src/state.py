@@ -9,6 +9,7 @@ import json
 from typing import Optional
 
 from db import latest_state, save_state_snapshot
+from parse_utils import strip_json_fences
 
 DEFAULT_STATE = {
     "mood": "neutral",          # neutral | good | low | happy | anxious | restless | tired | content
@@ -75,18 +76,17 @@ Do not perform these states. Just let them bleed through naturally.
 """.strip()
 
 
-def parse_state_response(raw: str, fallback: dict) -> dict:
-    """Parse a JSON state blob from the model, tolerating fenced code blocks."""
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    raw = raw.strip()
+def validate_state(parsed: dict, fallback: dict) -> dict:
+    """Coerce an already-parsed state dict into the canonical schema.
 
-    updated = json.loads(raw)
-    if not isinstance(updated, dict):
+    Missing keys fall back to the corresponding `fallback` value; extra keys
+    are dropped.
+    """
+    if not isinstance(parsed, dict):
         raise ValueError("state response was not a JSON object")
-    return {k: updated.get(k, fallback[k]) for k in DEFAULT_STATE}
+    return {k: parsed.get(k, fallback[k]) for k in DEFAULT_STATE}
 
 
+def parse_state_response(raw: str, fallback: dict) -> dict:
+    """Parse a raw LLM response string (optionally fenced) into a state dict."""
+    return validate_state(json.loads(strip_json_fences(raw)), fallback)

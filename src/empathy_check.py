@@ -102,16 +102,16 @@ Detector = Callable[[str, str, dict], Optional[str]]
 
 
 def _detect_minimizing(user_msg: str, draft: str, emotion: dict) -> Optional[str]:
-    if MINIMIZING.search(draft):
-        match = MINIMIZING.search(draft).group(0)
-        return f"used a minimizing phrase ({match!r}) — don't compare or downplay"
+    m = MINIMIZING.search(draft)
+    if m:
+        return f"used a minimizing phrase ({m.group(0)!r}) — don't compare or downplay"
     return None
 
 
 def _detect_toxic_positivity(user_msg: str, draft: str, emotion: dict) -> Optional[str]:
-    if TOXIC_POSITIVITY.search(draft):
-        match = TOXIC_POSITIVITY.search(draft).group(0)
-        return f"used a stock-positivity cliché ({match!r}) — say something specific instead"
+    m = TOXIC_POSITIVITY.search(draft)
+    if m:
+        return f"used a stock-positivity cliché ({m.group(0)!r}) — say something specific instead"
     return None
 
 

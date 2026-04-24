@@ -1,12 +1,13 @@
-"""Emotion schema + parser + system-block formatter.
+"""Emotion schema + validator + system-block formatter.
 
-The LLM call itself now lives in `user_read.py` (merged with theory-of-mind
+The LLM call itself lives in `user_read.py` (merged with theory-of-mind
 into a single pre-generation round-trip). This module keeps the label
-whitelist, the validator (`_parse`), the default shape, and the
-`<user_emotion>` system-block formatter — all of which user_read and the
-pipeline still consume.
+whitelist, the validator (`_validate`), the default shape, and the
+`<user_emotion>` system-block formatter.
 """
 import json
+
+from parse_utils import strip_json_fences
 
 EMOTION_TAG = "<user_emotion>"
 
@@ -29,15 +30,12 @@ DEFAULT_EMOTION = {
 }
 
 
-def _parse(raw: str) -> dict:
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    raw = raw.strip()
+def _validate(parsed: dict) -> dict:
+    """Coerce an already-parsed emotion dict into the canonical schema.
 
-    parsed = json.loads(raw)
+    LLMs occasionally produce out-of-range intensities, unknown labels, or
+    wrong types — we clamp/whitelist/default rather than reject.
+    """
     if not isinstance(parsed, dict):
         raise ValueError("emotion response was not a JSON object")
 
@@ -71,6 +69,11 @@ def _parse(raw: str) -> dict:
         "underlying_need": need,
         "undertones": undertones,
     }
+
+
+def _parse(raw: str) -> dict:
+    """Parse a raw LLM response string (optionally fenced) into the canonical dict."""
+    return _validate(json.loads(strip_json_fences(raw)))
 
 
 def format_emotion_block(emotion: dict) -> str:

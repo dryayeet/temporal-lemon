@@ -1,13 +1,9 @@
 """Merged post-generation bookkeeping: one LLM call covering facts + state.
 
-Replaces the old pair of `fact_extractor.extract_facts` +
-`state.update_internal_state` round-trips with a single STATE_MODEL call.
-The model reads the just-completed exchange and emits a JSON object with
-two sub-dicts that match the existing downstream contracts exactly.
-
-Parsing delegates to `fact_extractor._parse` and `state.parse_state_response`
-via a re-dump, which preserves key/value hygiene and schema defaults without
-duplication here.
+Replaces the old pair of separate fact-extractor and state-updater
+round-trips with a single STATE_MODEL call. The model reads the just-
+completed exchange and emits a JSON object with two sub-dicts matching
+the existing downstream contracts exactly.
 """
 from __future__ import annotations
 
@@ -17,8 +13,9 @@ from typing import Optional
 import requests
 
 from config import OPENROUTER_HEADERS, OPENROUTER_URL, STATE_MODEL
-from fact_extractor import _parse as _parse_facts
-from state import DEFAULT_STATE, parse_state_response
+from fact_extractor import _validate as _validate_facts
+from parse_utils import format_recent_for_prompt, strip_json_fences
+from state import DEFAULT_STATE, validate_state
 
 
 def _build_prompt(
@@ -29,12 +26,7 @@ def _build_prompt(
     recent_msgs: Optional[list[dict]],
     max_new: int,
 ) -> str:
-    context_lines: list[str] = []
-    if recent_msgs:
-        for m in recent_msgs[-6:]:
-            role = "Them" if m["role"] == "user" else "You (lemon)"
-            context_lines.append(f"{role}: {m['content']}")
-    context = "\n".join(context_lines) if context_lines else "(no prior turns)"
+    context = format_recent_for_prompt(recent_msgs)
 
     if existing_facts:
         known = "\n".join(f"  {k}: {v}" for k, v in existing_facts.items())
@@ -89,15 +81,6 @@ Respond with ONLY the JSON object. No explanation, no markdown.
 """.strip()
 
 
-def _strip_fences(raw: str) -> str:
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    return raw.strip()
-
-
 def bookkeep(
     user_msg: str,
     bot_reply: str,
@@ -131,23 +114,15 @@ def bookkeep(
         response.raise_for_status()
         raw = response.json()["choices"][0]["message"]["content"]
 
-        parsed = json.loads(_strip_fences(raw))
+        parsed = json.loads(strip_json_fences(raw))
         if not isinstance(parsed, dict):
             raise ValueError("post_exchange response was not a JSON object")
 
-        facts_sub = parsed.get("facts") or {}
-        state_sub = parsed.get("state") or {}
-        if not isinstance(facts_sub, dict):
-            facts_sub = {}
-        if not isinstance(state_sub, dict):
-            state_sub = {}
+        facts_sub = parsed.get("facts") if isinstance(parsed.get("facts"), dict) else {}
+        state_sub = parsed.get("state") if isinstance(parsed.get("state"), dict) else {}
 
-        # Reuse existing validators via a re-dump so every hygiene rule applies.
-        new_facts = _parse_facts(json.dumps(facts_sub), max_new=max_new) if facts_sub else {}
-        new_state = (
-            parse_state_response(json.dumps(state_sub), fallback=state_in)
-            if state_sub else state_in
-        )
+        new_facts = _validate_facts(facts_sub, max_new) if facts_sub else {}
+        new_state = validate_state(state_sub, fallback=state_in) if state_sub else state_in
         return new_facts, new_state
 
     except requests.HTTPError as e:

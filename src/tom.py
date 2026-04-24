@@ -1,12 +1,13 @@
-"""Theory-of-Mind schema + parser + system-block formatter.
+"""Theory-of-Mind schema + validator + system-block formatter.
 
-The LLM call itself now lives in `user_read.py` (merged with emotion into
+The LLM call itself lives in `user_read.py` (merged with emotion into
 a single pre-generation round-trip). This module keeps the default shape,
-the validator (`_parse`), and the `<theory_of_mind>` system-block formatter
-that the pipeline injects.
+the validator (`_validate`), and the `<theory_of_mind>` system-block formatter.
 """
 import json
 from typing import Optional
+
+from parse_utils import strip_json_fences
 
 TOM_TAG = "<theory_of_mind>"
 
@@ -17,31 +18,29 @@ DEFAULT_TOM = {
 }
 
 
-def _parse(raw: str) -> dict:
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    raw = raw.strip()
+def _short_str(v) -> Optional[str]:
+    if v is None:
+        return None
+    if not isinstance(v, str):
+        v = str(v)
+    v = v.strip()
+    return v or None
 
-    parsed = json.loads(raw)
+
+def _validate(parsed: dict) -> dict:
+    """Coerce an already-parsed ToM dict into the canonical schema."""
     if not isinstance(parsed, dict):
         raise ValueError("tom response was not a JSON object")
-
-    def _short_str(v) -> Optional[str]:
-        if v is None:
-            return None
-        if not isinstance(v, str):
-            v = str(v)
-        v = v.strip()
-        return v or None
-
     return {
         "feeling": _short_str(parsed.get("feeling")),
         "avoid": _short_str(parsed.get("avoid")),
         "what_helps": _short_str(parsed.get("what_helps")),
     }
+
+
+def _parse(raw: str) -> dict:
+    """Parse a raw LLM response string (optionally fenced) into the canonical dict."""
+    return _validate(json.loads(strip_json_fences(raw)))
 
 
 def format_tom_block(tom: dict) -> str:

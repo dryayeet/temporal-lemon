@@ -75,15 +75,11 @@ def _inject_block(history: list[dict], tag: str, content: str) -> list[dict]:
     return filtered
 
 
-def _recent_messages_for_context(history: list[dict], n: int = 6) -> list[dict]:
-    """Pull the last n non-system messages out of `history` to give classifiers context."""
+def recent_messages_for_context(history: list[dict], n: int = 6) -> list[dict]:
+    """Pull the last n non-system messages out of `history` so classifiers
+    and the bookkeeping thread get the same conversational view."""
     convo = [m for m in history if m["role"] != "system"]
     return convo[-n:]
-
-
-# Public alias so callers (web.py, lem.py) can share the same recent-msgs
-# view when they build the bookkeeping payload in their background thread.
-recent_messages_for_context = _recent_messages_for_context
 
 
 def run_empathy_turn(
@@ -124,7 +120,7 @@ def run_empathy_turn(
         return reply, trace
 
     trace.pipeline_used = True
-    recent = _recent_messages_for_context(base_history)
+    recent = recent_messages_for_context(base_history)
 
     # ---------- 1. merged read: emotion + theory-of-mind in one call ----------
     if on_phase:
@@ -152,7 +148,7 @@ def run_empathy_turn(
     )
     trace.memories = memories
 
-    # ---------- 4. inject blocks + draft ----------
+    # ---------- 3. inject blocks + draft ----------
     history = list(base_history)
     if memories:
         history = _inject_block(history, MEMORY_TAG, format_memory_block(memories))
@@ -167,7 +163,7 @@ def run_empathy_turn(
     draft = generate_reply(history, model=model)
     trace.draft = draft
 
-    # ---------- 5. post-check ----------
+    # ---------- 4. post-check ----------
     check = check_response(user_msg, draft, emotion)
     trace.check = check
 

@@ -74,21 +74,6 @@ def generate_reply(history: list[dict], model: Optional[str] = None) -> str:
     return "".join(iter_chat(history, model=model))
 
 
-def stream_chat(
-    history: list[dict],
-    energy: str = "medium",
-    model: Optional[str] = None,
-) -> str:
-    """CLI helper: stream `history` to stdout, return the full reply."""
-    print("lemon: ", end="", flush=True)
-    chunks: list[str] = []
-    for delta in iter_chat(history, model=model):
-        print(delta, end="", flush=True)
-        chunks.append(delta)
-    print("\n")
-    return "".join(chunks)
-
-
 def _iter_sse_deltas(lines: Iterable[str]) -> Iterator[str]:
     """Parse OpenRouter SSE lines and yield content deltas as strings."""
     for raw_line in lines:

@@ -172,16 +172,6 @@ def log_message(
         return cur.lastrowid
 
 
-def session_messages(session_id: int, path: Optional[Path] = None) -> list[dict]:
-    with connect(path) as c:
-        rows = c.execute(
-            "SELECT role, content, created_at, emotion, intensity, salience "
-            "FROM messages WHERE session_id = ? ORDER BY id ASC",
-            (session_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
 def find_messages_by_emotion(
     emotion: str,
     exclude_session_id: Optional[int] = None,
@@ -202,21 +192,6 @@ def find_messages_by_emotion(
 
     with connect(path) as c:
         rows = c.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
-
-
-def find_recent_messages(
-    limit: int = 6,
-    path: Optional[Path] = None,
-) -> list[dict]:
-    """Most recent user/assistant rows across all sessions, newest first."""
-    with connect(path) as c:
-        rows = c.execute(
-            "SELECT id, session_id, role, content, created_at, emotion, intensity "
-            "FROM messages WHERE role IN ('user', 'assistant') "
-            "ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
         return [dict(r) for r in rows]
 
 
@@ -269,8 +244,3 @@ def delete_fact(key: str, path: Optional[Path] = None) -> bool:
     with connect(path) as c:
         cur = c.execute("DELETE FROM facts WHERE key = ?", (key,))
         return cur.rowcount > 0
-
-
-def clear_facts(path: Optional[Path] = None) -> None:
-    with connect(path) as c:
-        c.execute("DELETE FROM facts")
