@@ -1,6 +1,6 @@
 # lemon
 
-A chatbot that simulates a friend, not an assistant. Runs on OpenRouter (Claude Haiku 4.5 by default, with Anthropic-style prompt caching on the persona block). Keeps an internal emotional state, runs a per-turn empathy pipeline (emotion classifier → memory → theory-of-mind → sentiment-mirror check), auto-extracts durable facts from conversation and remembers them across sessions in SQLite, and types like a person.
+A chatbot that simulates a friend, not an assistant. Runs on OpenRouter (Claude Haiku 4.5 by default, with Anthropic-style prompt caching on the persona block). Keeps an internal emotional state, runs a per-turn empathy pipeline (merged emotion + theory-of-mind read → memory retrieval → draft → sentiment-mirror check → regenerate-once on failure), and auto-extracts durable facts + nudges its own state in a single post-reply bookkeeping call that runs in the background so the user never waits on it. Everything persists across sessions in SQLite.
 
 Two frontends share the same backend: a CLI REPL and a single-page web UI.
 
@@ -28,7 +28,6 @@ Optional overrides (also via env var):
 | `LEMON_MEMORY_LIMIT`   | `3`                              | how many past matching-emotion messages to surface per turn    |
 | `LEMON_AUTO_FACTS`     | `1`                              | auto-extract durable facts from each exchange                  |
 | `LEMON_AUTO_FACTS_MAX` | `3`                              | max facts saved per turn                                       |
-| `LEMON_HUMANIZE`       | `1`                              | toggle per-token typing pacing                                 |
 | `LEMON_DB`             | `.lemon.db`                      | SQLite path (resolved against project root; absolute OK)       |
 
 ## Run
@@ -63,27 +62,34 @@ pytest
 
 ```
 src/
-  config.py         env, models, knobs, paths, HTTP headers
-  prompt.py         persona prompt + opener pool
-  time_context.py   time-of-day + session-duration system block
-  history.py        memory gradient + system-block swap helper
-  state.py          internal state: load/save/format/parse/update
-  facts.py          user-facts system block formatter
-  db.py             SQLite: sessions, messages (with emotion fields), snapshots, facts
-  commands.py       slash-command registry + dispatcher
-  chat.py           OpenRouter call: caching, streaming, humanized pacing
-  emotion.py        pre-generation user-emotion classifier
-  tom.py            theory-of-mind side pass
-  memory.py         emotion-tagged retrieval from db
-  empathy_check.py  sentiment-mirror post-check (regex / heuristics)
-  pipeline.py       orchestrates classify → retrieve → ToM → draft → check → regen
-  lem.py            CLI entry point
-  web.py            FastAPI app (chat, commands, introspection, /trace)
+  config.py           env, models, knobs, paths, HTTP headers
+  prompt.py           persona prompt + opener pool
+  time_context.py     time-of-day + session-duration system block
+  history.py          memory gradient + system-block swap helper
+  state.py            internal state: defaults, load/save/format + validator
+  facts.py            user-facts system block formatter
+  db.py               SQLite: sessions, messages (with emotion fields), snapshots, facts
+  commands.py         slash-command registry + dispatcher
+  chat.py             OpenRouter reply call: prompt caching + SSE streaming
+  parse_utils.py      shared fence-stripper + recent-msgs prompt formatter
+  emotion.py          emotion schema, validator, system-block formatter
+  tom.py              theory-of-mind schema, validator, system-block formatter
+  fact_extractor.py   fact-key regex + value-hygiene validator
+  user_read.py        merged pre-gen LLM call: emotion + theory-of-mind in one round-trip
+  post_exchange.py    merged post-gen LLM call: fact extraction + state nudge in one round-trip
+  memory.py           emotion-tagged retrieval from db
+  empathy_check.py    sentiment-mirror post-check (regex / heuristics)
+  pipeline.py         orchestrates read_user → memory → draft → check → regen-once
+  session_context.py  shared helpers for CLI + web: initial history, refresh blocks, bookkeeping thread
+  lem.py              CLI entry point
+  web.py              FastAPI app (chat, commands, introspection, /trace)
   templates/
-    index.html      single-page web UI
-tests/              pytest suite (one file per src module)
-docs/               architecture, slash commands, db schema, web UI, empathy research
+    index.html        single-page web UI
+tests/                pytest suite (most src modules)
+docs/                 architecture, slash commands, db schema, web UI, empathy research
 ```
+
+Per-turn LLM cost: **3 calls** (`user_read` + reply + `post_exchange`), of which only the first two block the user — bookkeeping runs in a daemon thread after the reply ships. Retry on sentiment-mirror failure adds a fourth reply call.
 
 ## Documentation
 
