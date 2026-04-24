@@ -191,56 +191,58 @@
     }
 
     // ice cream parlor theme for the typing indicator.
-    // each backend phase maps to a pool of fun verbs; we pick one at random
-    // every time the phase fires so the label keeps changing across a turn.
-    const PHASE_POOLS = {
-      "reading you": [
-        "tasting the mood",
-        "sniffing the vibe",
-        "reading the menu",
-        "sampling the flavor",
-        "checking the temperature",
-      ],
-      "remembering": [
-        "rifling the sprinkle jar",
-        "rummaging the topping bins",
-        "digging through the freezer",
-        "flipping through the flavor cards",
-        "checking the chalkboard",
-      ],
-      "thinking": [
-        "picking a flavor",
-        "swirling the softserve",
-        "choosing a scoop",
-        "weighing the cones",
-        "brainfreeze computing",
-        "debating sorbet vs gelato",
-      ],
-      "replying": [
-        "drizzling syrup",
-        "adding the cherry",
-        "garnishing with mint",
-        "plating the cone",
-        "packing the scoop",
-        "finishing with sprinkles",
-      ],
-      "rephrasing": [
-        "re-scooping",
-        "swapping the cone",
-        "re-drizzling",
-        "starting the scoop over",
-      ],
-      "making a note": [
-        "writing on the chalkboard menu",
-        "jotting a new flavor idea",
-        "filing a sprinkle note",
-      ],
-    };
-    const FALLBACK_PHRASES = ["scooping", "stirring", "working the freezer"];
+    // one flat phrase pool; we pick one at random on every phase event,
+    // regardless of which phase fired, so the label stays varied.
+    const PHASE_PHRASES = [
+      "tasting the mood",
+      "sniffing the vibe",
+      "reading the menu",
+      "sampling the flavor",
+      "checking the temperature",
+      "rifling the sprinkle jar",
+      "rummaging the topping bins",
+      "digging through the freezer",
+      "flipping through the flavor cards",
+      "checking the chalkboard",
+      "picking a flavor",
+      "swirling the softserve",
+      "choosing a scoop",
+      "weighing the cones",
+      "brainfreeze computing",
+      "debating sorbet vs gelato",
+      "drizzling syrup",
+      "adding the cherry",
+      "garnishing with mint",
+      "plating the cone",
+      "packing the scoop",
+      "finishing with sprinkles",
+      "re-scooping",
+      "swapping the cone",
+      "re-drizzling",
+      "starting the scoop over",
+      "writing on the chalkboard menu",
+      "jotting a new flavor idea",
+      "filing a sprinkle note",
+      "polishing the scoop",
+      "warming the waffle cone",
+      "tempering the chocolate",
+      "grinding pistachios",
+      "toasting almond slivers",
+      "glazing the rim",
+      "dusting cocoa powder",
+      "folding in the fudge",
+      "churning a fresh batch",
+      "rolling a cone",
+      "stirring the caramel",
+      "torching the meringue",
+      "crumbling the biscotti",
+      "whipping the cream",
+      "zesting a lemon",
+      "squeezing the citrus",
+    ];
 
-    function pickPhrase(phase) {
-      const pool = PHASE_POOLS[phase] || FALLBACK_PHRASES;
-      return pool[Math.floor(Math.random() * pool.length)];
+    function pickPhrase() {
+      return PHASE_PHRASES[Math.floor(Math.random() * PHASE_PHRASES.length)];
     }
 
     function typingIndicator() {
@@ -249,7 +251,7 @@
 
       const scoop = document.createElement("span");
       scoop.className = "scoop";
-      scoop.textContent = "🍦";
+      scoop.textContent = "🍋";
 
       const label = document.createElement("span");
       label.className = "phase-label";
