@@ -23,7 +23,7 @@ from threading import Lock
 from typing import Any, Iterator, Optional
 
 import requests
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -134,6 +134,10 @@ log.info(
 # The HTML template is static; read it once at import instead of on every GET.
 _INDEX_HTML = (Path(__file__).parent / "templates" / "index.html").read_text(encoding="utf-8")
 
+# Brand asset (favicon + on-page logo). Loaded once into memory so we don't
+# need aiofiles/StaticFiles. ~940KB; trivial for a single-user local app.
+_LEMON_PNG_BYTES = (Path(__file__).parent / "static" / "lemon.png").read_bytes()
+
 
 # ---------- request / response models ----------
 
@@ -192,6 +196,26 @@ class HealthResponse(BaseModel):
 )
 def index() -> HTMLResponse:
     return HTMLResponse(_INDEX_HTML)
+
+
+# ---------- brand asset (favicon + on-page logo) ----------
+
+def _png_response() -> Response:
+    return Response(
+        content=_LEMON_PNG_BYTES,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon() -> Response:
+    return _png_response()
+
+
+@app.get("/static/lemon.png", include_in_schema=False)
+def lemon_png() -> Response:
+    return _png_response()
 
 
 # ---------- chat (SSE) ----------

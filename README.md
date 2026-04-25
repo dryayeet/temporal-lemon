@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="src/static/lemon.png" alt="lemon" width="180" />
+</p>
+
 # lemon
 
 A chatbot that simulates a friend, not an assistant. Runs on OpenRouter (Claude Haiku 4.5 by default, with Anthropic-style prompt caching on the persona block). Keeps an internal emotional state, runs a per-turn empathy pipeline (merged emotion + theory-of-mind read → memory retrieval → draft → sentiment-mirror check → regenerate-once on failure), and auto-extracts durable facts + nudges its own state in a single post-reply bookkeeping call that runs in the background so the user never waits on it. Everything persists across sessions in SQLite.
@@ -42,6 +46,61 @@ Web UI:
 python src/web.py
 # then visit http://127.0.0.1:8000
 ```
+
+## HTTP API
+
+Once `python src/web.py` is running, the FastAPI app exposes:
+
+**Interactive docs**
+
+| path             | what it serves                                  |
+| ---------------- | ----------------------------------------------- |
+| `/docs`          | Swagger UI (try requests in-browser)            |
+| `/redoc`         | ReDoc (read-only, prettier reference)           |
+| `/openapi.json`  | Raw OpenAPI 3 spec                              |
+
+**Health & liveness**
+
+| method + path | tag    | what it returns                                                                                                  |
+| ------------- | ------ | ---------------------------------------------------------------------------------------------------------------- |
+| `GET /ping`   | health | `{"pong": true}` — trivial liveness probe, returns immediately                                                   |
+| `GET /health` | health | DB readiness (`SELECT 1`), uptime, current session id, and the active config snapshot (chat/state model, knobs)  |
+
+**Chat**
+
+| method + path   | tag  | what it does                                                                                                                |
+| --------------- | ---- | --------------------------------------------------------------------------------------------------------------------------- |
+| `GET /`         | chat | Bundled single-page chat UI                                                                                                 |
+| `POST /chat`    | chat | Streams a reply via Server-Sent Events. Event types: `phase`, `token`, `done`, `error`. Body: `{"message": "..."}`         |
+| `POST /command` | chat | Runs a slash command (`/help`, `/facts`, `/reset`, …). Body: `{"text": "/help"}` → `{"output": "...", "exit": false}`       |
+
+**Introspection** (read-only)
+
+| method + path     | tag           | what it returns                                                                          |
+| ----------------- | ------------- | ---------------------------------------------------------------------------------------- |
+| `GET /state`      | introspection | The 6-field internal state dict                                                          |
+| `GET /facts`      | introspection | All stored user facts as a key/value map                                                 |
+| `GET /sessions`   | introspection | The latest 20 sessions (id, started_at, ended_at, msg_count)                             |
+| `GET /history`    | introspection | Current session's user/assistant turns (system blocks excluded)                          |
+| `GET /trace`      | introspection | Last pipeline trace: emotion read, ToM, retrieved memories, empathy-check, facts, regen  |
+
+**Static assets**
+
+| method + path           | what it serves                       |
+| ----------------------- | ------------------------------------ |
+| `GET /favicon.ico`      | The lemon icon (PNG, 24h cached)     |
+| `GET /static/lemon.png` | Same icon used by the in-page header |
+
+Every request also returns a correlation id in the `X-Request-ID` response header; the same id appears in the server log lines for that request.
+
+### Logging
+
+The server (and CLI) configure a `lemon.*` logger tree at startup. Tune via env:
+
+| variable            | default | meaning                                                              |
+| ------------------- | ------- | -------------------------------------------------------------------- |
+| `LEMON_LOG_LEVEL`   | `INFO`  | `DEBUG` dumps full request/response bodies and prompts; `INFO` shows every API call, response, DB write, pipeline phase |
+| `LEMON_LOG_FILE`    | (unset) | If set, also writes the same records to this path                    |
 
 ## Slash commands
 
