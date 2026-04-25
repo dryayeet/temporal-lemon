@@ -10,6 +10,7 @@ The prompt itself lives in `prompts.build_bookkeep_prompt`.
 from __future__ import annotations
 
 import json
+import time
 from typing import Optional
 
 import requests
@@ -17,8 +18,11 @@ import requests
 from config import OPENROUTER_HEADERS, OPENROUTER_URL, STATE_MODEL
 from empathy.fact_extractor import _validate as _validate_facts
 from llm.parse_utils import strip_json_fences
+from logging_setup import get_logger, preview, shape_of
 from prompts import build_bookkeep_prompt
 from storage.state import DEFAULT_STATE, validate_state
+
+log = get_logger("empathy.post_exchange")
 
 
 def bookkeep(
@@ -37,22 +41,53 @@ def bookkeep(
     """
     existing = existing_facts or {}
     state_in = dict(current_state) if current_state else dict(DEFAULT_STATE)
-    prompt = build_bookkeep_prompt(user_msg, bot_reply, existing, state_in, recent_msgs, max_new)
+    chosen_model = model or STATE_MODEL
 
+    log.info(
+        "event=bookkeep_call model=%s msg_len=%d reply_len=%d existing_facts=%d "
+        "recent_msgs=%d max_new=%d",
+        chosen_model, len(user_msg), len(bot_reply), len(existing),
+        len(recent_msgs or []), max_new,
+    )
+    log.debug(
+        "event=bookkeep_input user_msg=%r bot_reply=%r facts=%s state=%s",
+        preview(user_msg), preview(bot_reply),
+        shape_of(existing), shape_of(state_in),
+    )
+
+    prompt = build_bookkeep_prompt(user_msg, bot_reply, existing, state_in, recent_msgs, max_new)
+    log.debug("event=bookkeep_prompt chars=%d", len(prompt))
+
+    started = time.time()
     try:
         response = requests.post(
             OPENROUTER_URL,
             headers=OPENROUTER_HEADERS,
             json={
-                "model": model or STATE_MODEL,
+                "model": chosen_model,
                 "temperature": 0.2,
                 "max_tokens": 500,
                 "messages": [{"role": "user", "content": prompt}],
             },
             timeout=30,
         )
+        elapsed_ms = int((time.time() - started) * 1000)
+        log.info(
+            "event=bookkeep_response status=%d elapsed_ms=%d",
+            response.status_code, elapsed_ms,
+        )
         response.raise_for_status()
-        raw = response.json()["choices"][0]["message"]["content"]
+        body = response.json()
+        usage = body.get("usage") or {}
+        if usage:
+            log.info(
+                "event=bookkeep_usage prompt_tokens=%s completion_tokens=%s total=%s",
+                usage.get("prompt_tokens"), usage.get("completion_tokens"),
+                usage.get("total_tokens"),
+            )
+
+        raw = body["choices"][0]["message"]["content"]
+        log.debug("event=bookkeep_raw content=%s", raw)
 
         parsed = json.loads(strip_json_fences(raw))
         if not isinstance(parsed, dict):
@@ -63,12 +98,27 @@ def bookkeep(
 
         new_facts = _validate_facts(facts_sub, max_new) if facts_sub else {}
         new_state = validate_state(state_sub, fallback=state_in) if state_sub else state_in
+
+        changed_state_keys = [k for k in DEFAULT_STATE if state_in.get(k) != new_state.get(k)]
+        log.info(
+            "event=bookkeep_parsed new_facts=%d fact_keys=%s state_changed_keys=%s",
+            len(new_facts), list(new_facts.keys()), changed_state_keys,
+        )
+        log.debug(
+            "event=bookkeep_detail facts=%s state_before=%s state_after=%s",
+            new_facts, state_in, new_state,
+        )
         return new_facts, new_state
 
     except requests.HTTPError as e:
         body = getattr(e.response, "text", "")[:300]
-        print(f"  [post_exchange http error: {e} | body: {body}]")
+        log.warning(
+            "event=bookkeep_http_error error=%r body=%s — keeping existing state, no facts",
+            e, body,
+        )
         return {}, state_in
     except (requests.RequestException, json.JSONDecodeError, ValueError, KeyError) as e:
-        print(f"  [post_exchange failed: {e}]")
+        log.warning(
+            "event=bookkeep_failed error=%r — keeping existing state, no facts", e,
+        )
         return {}, state_in

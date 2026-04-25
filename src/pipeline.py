@@ -15,6 +15,8 @@ a thin wrapper around `chat.generate_reply`.
 """
 from __future__ import annotations
 
+import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -22,6 +24,7 @@ import config
 from empathy.empathy_check import CheckResult, check_response
 from empathy.user_read import read_user
 from llm.chat import generate_reply
+from logging_setup import get_logger, preview
 from prompt_stack import compress_history
 from prompts import (
     CRITIQUE_TAG,
@@ -35,6 +38,8 @@ from prompts import (
 )
 from storage import db
 from storage.memory import relevant_memories
+
+log = get_logger("pipeline")
 
 # Phase labels used by the SSE relay so the web UI can show "lemon is reading
 # you...", etc. CLI ignores them by default.
@@ -109,9 +114,19 @@ def run_empathy_turn(
     """
     trace = PipelineTrace()
     keep_recent_turns = keep_recent_turns or config.KEEP_RECENT_TURNS
+    turn_id = uuid.uuid4().hex[:8]
+    turn_started = time.time()
+
+    log.info(
+        "event=turn_start turn=%s session=%s msg_len=%d msg_preview=%r "
+        "base_history_len=%d pipeline=%s keep_recent=%d",
+        turn_id, session_id, len(user_msg), preview(user_msg, 80),
+        len(base_history), config.ENABLE_EMPATHY_PIPELINE, keep_recent_turns,
+    )
 
     # ---------- short-circuit when pipeline disabled ----------
     if not config.ENABLE_EMPATHY_PIPELINE:
+        log.info("event=turn_short_circuit turn=%s reason=pipeline_disabled", turn_id)
         if on_phase:
             on_phase(PHASE_REPLYING)
         history = list(base_history)
@@ -123,6 +138,12 @@ def run_empathy_turn(
         if session_id is not None:
             db.log_message(session_id, "assistant", reply)
         trace.final = reply
+        log.info(
+            "event=turn_done turn=%s session=%s reply_chars=%d elapsed_ms=%d "
+            "pipeline=False regenerated=False",
+            turn_id, session_id, len(reply),
+            int((time.time() - turn_started) * 1000),
+        )
         return reply, trace
 
     trace.pipeline_used = True
@@ -131,7 +152,13 @@ def run_empathy_turn(
     # ---------- 1. merged read: emotion + theory-of-mind in one call ----------
     if on_phase:
         on_phase(PHASE_READING)
+    log.info("event=phase_start turn=%s phase=%s", turn_id, PHASE_READING)
+    phase_started = time.time()
     emotion, tom = read_user(user_msg, recent_msgs=recent, model=model)
+    log.info(
+        "event=phase_done turn=%s phase=%s elapsed_ms=%d",
+        turn_id, PHASE_READING, int((time.time() - phase_started) * 1000),
+    )
     trace.emotion = emotion
     trace.tom = tom
 
@@ -147,48 +174,104 @@ def run_empathy_turn(
     # ---------- 2. retrieve memories (DB only, no LLM) ----------
     if on_phase:
         on_phase(PHASE_REMEMBERING)
+    log.info("event=phase_start turn=%s phase=%s", turn_id, PHASE_REMEMBERING)
+    phase_started = time.time()
     memories = relevant_memories(
         emotion=emotion.get("primary", "neutral"),
         current_session_id=session_id,
         limit=config.MEMORY_RETRIEVAL_LIMIT,
     )
+    log.info(
+        "event=phase_done turn=%s phase=%s elapsed_ms=%d retrieved=%d emotion=%s",
+        turn_id, PHASE_REMEMBERING, int((time.time() - phase_started) * 1000),
+        len(memories), emotion.get("primary"),
+    )
     trace.memories = memories
 
     # ---------- 3. inject blocks + draft ----------
     history = list(base_history)
+    blocks_injected = []
     if memories:
         history = _inject_block(history, MEMORY_TAG, format_memory_block(memories))
+        blocks_injected.append("memory")
     history = _inject_block(history, EMOTION_TAG, format_emotion_block(emotion))
+    blocks_injected.append("emotion")
     history = _inject_block(history, TOM_TAG, format_tom_block(tom))
+    blocks_injected.append("tom")
+    log.info("event=blocks_injected turn=%s blocks=%s", turn_id, blocks_injected)
 
     history.append({"role": "user", "content": user_msg})
+    pre_compress_len = len(history)
     history = compress_history(history, keep_recent=keep_recent_turns)
+    if len(history) != pre_compress_len:
+        log.info(
+            "event=history_compressed turn=%s pre=%d post=%d folded=%d",
+            turn_id, pre_compress_len, len(history),
+            pre_compress_len - len(history),
+        )
 
     if on_phase:
         on_phase(PHASE_REPLYING)
+    log.info("event=phase_start turn=%s phase=%s", turn_id, PHASE_REPLYING)
+    phase_started = time.time()
     draft = generate_reply(history, model=model)
+    log.info(
+        "event=phase_done turn=%s phase=%s elapsed_ms=%d draft_chars=%d preview=%r",
+        turn_id, PHASE_REPLYING, int((time.time() - phase_started) * 1000),
+        len(draft), preview(draft, 80),
+    )
     trace.draft = draft
 
     # ---------- 4. post-check ----------
     check = check_response(user_msg, draft, emotion)
     trace.check = check
+    log.info(
+        "event=empathy_check turn=%s passed=%s failures=%d critique_chars=%d",
+        turn_id, check.passed,
+        len(getattr(check, "failures", []) or []),
+        len(getattr(check, "critique", "") or ""),
+    )
 
     final = draft
     if not check.passed and config.EMPATHY_RETRY_ON_FAIL:
         if on_phase:
             on_phase(PHASE_REVISING)
+        log.info(
+            "event=phase_start turn=%s phase=%s reason=empathy_check_failed",
+            turn_id, PHASE_REVISING,
+        )
+        phase_started = time.time()
         retry_history = _inject_block(history, CRITIQUE_TAG, format_critique_block(draft, check.critique))
         try:
             second = generate_reply(retry_history, model=model)
             if second.strip():
                 final = second
                 trace.regenerated = True
+                log.info(
+                    "event=regenerated turn=%s old_chars=%d new_chars=%d "
+                    "elapsed_ms=%d preview=%r",
+                    turn_id, len(draft), len(final),
+                    int((time.time() - phase_started) * 1000),
+                    preview(final, 80),
+                )
+            else:
+                log.warning(
+                    "event=regenerate_empty turn=%s — keeping original draft",
+                    turn_id,
+                )
         except Exception as e:
-            print(f"  [empathy retry failed: {e}]")
+            log.error("event=regenerate_failed turn=%s error=%r", turn_id, e)
 
     if session_id is not None:
         db.log_message(session_id, "assistant", final)
     trace.final = final
+
+    log.info(
+        "event=turn_done turn=%s session=%s final_chars=%d regenerated=%s "
+        "elapsed_ms=%d pipeline=True",
+        turn_id, session_id, len(final), trace.regenerated,
+        int((time.time() - turn_started) * 1000),
+    )
 
     # Post-exchange bookkeeping (facts + state nudge) runs OUTSIDE the pipeline
     # in a background thread — see web.py / lem.py. Pipeline returns now so

@@ -13,8 +13,10 @@ from datetime import datetime
 from typing import Optional
 
 import config
+import time
 from commands import ChatContext
 from empathy.post_exchange import bookkeep
+from logging_setup import get_logger
 from prompt_stack import replace_system_block
 from prompts import (
     FACTS_TAG,
@@ -26,6 +28,8 @@ from prompts import (
 from storage import db
 from storage.state import save_state
 
+log = get_logger("session_context")
+
 
 def initial_history(internal_state: dict, session_start: datetime) -> list[dict]:
     """Build the seed system-prompt stack for a fresh session."""
@@ -34,9 +38,14 @@ def initial_history(internal_state: dict, session_start: datetime) -> list[dict]
         {"role": "system", "content": get_time_context(session_start)},
         {"role": "system", "content": format_internal_state(internal_state)},
     ]
-    facts_block = format_user_facts(db.get_facts())
+    facts = db.get_facts()
+    facts_block = format_user_facts(facts)
     if facts_block:
         history.append({"role": "system", "content": facts_block})
+    log.info(
+        "event=initial_history persona_chars=%d facts_count=%d blocks=%d",
+        len(LEMON_PROMPT), len(facts), len(history),
+    )
     return history
 
 
@@ -72,6 +81,11 @@ def run_bookkeeping(
     (REPL or SSE handler) never waits on it. Failures are logged and swallowed
     so a bookkeep hiccup never affects the reply that already shipped.
     """
+    started = time.time()
+    log.info(
+        "event=bookkeep_thread_start session=%s reply_chars=%d auto_facts=%s",
+        session_id, len(reply), config.ENABLE_AUTO_FACTS,
+    )
     try:
         existing = db.get_facts()
         if config.ENABLE_AUTO_FACTS:
@@ -86,14 +100,24 @@ def run_bookkeeping(
             )
         else:
             new_facts, new_state = {}, state_snapshot
+            log.info("event=bookkeep_thread_skipped reason=auto_facts_disabled")
 
+        upserted = 0
         with lock:
             for k, v in list(new_facts.items())[:config.AUTO_FACTS_MAX_PER_TURN]:
                 db.upsert_fact(k, v, source_session_id=session_id)
+                upserted += 1
             ctx.internal_state = new_state
             save_state(new_state, session_id=session_id)
             # surface extracted facts on the trace so /trace and /why report
             # them (after a short delay — bookkeeping runs post-reply).
             trace.facts_extracted = new_facts
+        log.info(
+            "event=bookkeep_thread_done session=%s upserted=%d state_saved=True elapsed_ms=%d",
+            session_id, upserted, int((time.time() - started) * 1000),
+        )
     except Exception as e:
-        print(f"  [bookkeeping thread failed: {e}]")
+        log.error(
+            "event=bookkeep_thread_failed session=%s error=%r elapsed_ms=%d",
+            session_id, e, int((time.time() - started) * 1000),
+        )

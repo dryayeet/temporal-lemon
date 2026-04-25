@@ -6,8 +6,10 @@ from typing import Optional
 
 import requests
 
+import config
 from commands import ChatContext, dispatch, is_command
 from config import CHAT_MODEL, KEEP_RECENT_TURNS
+from logging_setup import get_logger, setup_logging
 from pipeline import recent_messages_for_context, run_empathy_turn
 from prompts import LEMON_OPENERS
 from session_context import initial_history, refresh_base_blocks, run_bookkeeping
@@ -16,6 +18,16 @@ from storage.state import fresh_session_state, save_state
 
 
 def main() -> None:
+    setup_logging()
+    log = get_logger("lem")
+    log.info(
+        "event=cli_startup chat_model=%s state_model=%s empathy=%s "
+        "auto_facts=%s prompt_cache=%s db_path=%s",
+        config.CHAT_MODEL, config.STATE_MODEL,
+        config.ENABLE_EMPATHY_PIPELINE, config.ENABLE_AUTO_FACTS,
+        config.ENABLE_PROMPT_CACHE, config.DB_PATH,
+    )
+
     session_start = datetime.now()
     session_id = db.start_session()
     internal_state = fresh_session_state()

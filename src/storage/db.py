@@ -15,6 +15,9 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 import config
+from logging_setup import get_logger, preview
+
+log = get_logger("storage.db")
 
 # Fresh databases get this. Existing databases get the same shape via the
 # migrations list below, which adds columns one version at a time.
@@ -128,7 +131,9 @@ def start_session(path: Optional[Path] = None) -> int:
         cur = c.execute(
             "INSERT INTO sessions (started_at) VALUES (?)", (_now(),)
         )
-        return cur.lastrowid
+        sid = cur.lastrowid
+        log.info("event=db_session_start session=%s", sid)
+        return sid
 
 
 def end_session(session_id: int, path: Optional[Path] = None) -> None:
@@ -137,6 +142,7 @@ def end_session(session_id: int, path: Optional[Path] = None) -> None:
             "UPDATE sessions SET ended_at = ? WHERE id = ?",
             (_now(), session_id),
         )
+        log.info("event=db_session_end session=%s", session_id)
 
 
 def list_sessions(limit: int = 20, path: Optional[Path] = None) -> list[dict]:
@@ -169,7 +175,14 @@ def log_message(
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (session_id, role, content, _now(), emotion, intensity, salience),
         )
-        return cur.lastrowid
+        mid = cur.lastrowid
+        log.info(
+            "event=db_message_insert session=%s msg=%s role=%s chars=%d "
+            "emotion=%s intensity=%s preview=%r",
+            session_id, mid, role, len(content), emotion, intensity,
+            preview(content, 60),
+        )
+        return mid
 
 
 def find_messages_by_emotion(
@@ -192,6 +205,11 @@ def find_messages_by_emotion(
 
     with connect(path) as c:
         rows = c.execute(sql, params).fetchall()
+        log.debug(
+            "event=db_messages_lookup emotion=%s exclude_session=%s limit=%d "
+            "returned=%d",
+            emotion, exclude_session_id, limit, len(rows),
+        )
         return [dict(r) for r in rows]
 
 
@@ -213,6 +231,11 @@ def save_state_snapshot(state: dict, session_id: Optional[int] = None,
             "VALUES (?, ?, ?)",
             (session_id, _now(), json.dumps(state)),
         )
+        log.info(
+            "event=db_state_save session=%s mood=%s energy=%s engagement=%s disposition=%s",
+            session_id, state.get("mood"), state.get("energy"),
+            state.get("engagement"), state.get("disposition"),
+        )
 
 
 # ---------- facts ----------
@@ -232,6 +255,10 @@ def upsert_fact(key: str, value: str, source_session_id: Optional[int] = None,
             """,
             (key, value, source_session_id, now, now),
         )
+        log.info(
+            "event=db_fact_upsert key=%s value=%r source_session=%s",
+            key, preview(value, 80), source_session_id,
+        )
 
 
 def get_facts(path: Optional[Path] = None) -> dict[str, str]:
@@ -243,4 +270,6 @@ def get_facts(path: Optional[Path] = None) -> dict[str, str]:
 def delete_fact(key: str, path: Optional[Path] = None) -> bool:
     with connect(path) as c:
         cur = c.execute("DELETE FROM facts WHERE key = ?", (key,))
-        return cur.rowcount > 0
+        deleted = cur.rowcount > 0
+        log.info("event=db_fact_delete key=%s deleted=%s", key, deleted)
+        return deleted
