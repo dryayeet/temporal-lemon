@@ -75,7 +75,7 @@ N. user: <latest message>
 
 If `LEMON_PROMPT_CACHE=1` (Anthropic models only) the persona block is wrapped with `cache_control: ephemeral`.
 
-The memory gradient (`prompt.history.compress_history`) keeps the most recent `KEEP_RECENT_TURNS` (default 8) verbatim and folds older turns into a single `<earlier_conversation>` summary block.
+The memory gradient (`prompt_stack.compress_history`) keeps the most recent `KEEP_RECENT_TURNS` (default 8) verbatim and folds older turns into a single `<earlier_conversation>` summary block.
 
 ## State machine
 

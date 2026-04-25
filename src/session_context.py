@@ -15,12 +15,16 @@ from typing import Optional
 import config
 from commands import ChatContext
 from empathy.post_exchange import bookkeep
-from prompt.facts import FACTS_TAG, format_user_facts
-from prompt.history import replace_system_block
-from prompt.persona import LEMON_PROMPT
-from prompt.time_context import get_time_context
+from prompt_stack import replace_system_block
+from prompts import (
+    FACTS_TAG,
+    LEMON_PROMPT,
+    format_internal_state,
+    format_user_facts,
+    get_time_context,
+)
 from storage import db
-from storage.state import format_internal_state, save_state
+from storage.state import save_state
 
 
 def initial_history(internal_state: dict, session_start: datetime) -> list[dict]:

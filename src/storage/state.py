@@ -1,9 +1,10 @@
-"""Internal-state lifecycle: defaults, parsing, formatting, persistence.
+"""Internal-state lifecycle: defaults, parsing, persistence.
 
 State persists in SQLite (see `storage/db.py`). The chat loop loads the latest
 snapshot on startup and saves a new snapshot every time the state changes.
 The LLM call that nudges the state lives in `empathy/post_exchange.py` (merged
-with fact extraction into a single post-generation round-trip).
+with fact extraction into a single post-generation round-trip). The
+`<internal_state>` system-block formatter lives in `prompts.py`.
 """
 import json
 from typing import Optional
@@ -52,28 +53,6 @@ def fresh_session_state() -> dict:
 
 def save_state(state: dict, session_id: Optional[int] = None) -> None:
     save_state_snapshot(state, session_id=session_id)
-
-
-def format_internal_state(state: dict) -> str:
-    thread = state["emotional_thread"] or "nothing specific"
-    activity = state["recent_activity"] or "nothing worth mentioning"
-
-    return f"""
-<internal_state>
-This is your current internal state. It is the reason behind how you text, not something you talk about.
-Your responses should naturally reflect this state without ever naming it.
-
-Mood: {state["mood"]}
-Energy: {state["energy"]}
-Engagement level: {state["engagement"]}
-What's on your mind: {thread}
-What you've been up to: {activity}
-Disposition toward this person right now: {state["disposition"]}
-
-Let this shape your word choice, reply length, warmth, and how much you push the conversation.
-Do not perform these states. Just let them bleed through naturally.
-</internal_state>
-""".strip()
 
 
 def validate_state(parsed: dict, fallback: dict) -> dict:

@@ -150,7 +150,7 @@ user types a message
   ▼
 [refresh base blocks]  session_context.refresh_base_blocks()
   replaces <time_context>, <internal_state>, <user_facts> at positions
-  1/2/3 via prompt.history.replace_system_block.
+  1/2/3 via prompt_stack.replace_system_block.
   │
   ▼
 if is_command(user_input):
@@ -236,11 +236,11 @@ The `messages` list passed to OpenRouter for the main chat call:
 Key invariants:
 
 - **Order of injection is deterministic.** `_inject_block` drops any prior block with the same tag, then inserts the new content just after the leading contiguous block of system messages.
-- **`time_context` + `internal_state` + `user_facts` change every turn** and by construction live at positions 1, 2, 3 (managed by `replace_system_block` in `prompt.history`).
+- **`time_context` + `internal_state` + `user_facts` change every turn** and by construction live at positions 1, 2, 3 (managed by `replace_system_block` in `prompt_stack`).
 - **Persona block never changes.** That is what makes the cache hit work.
 - **Emotion/ToM/Memory blocks are pipeline-scoped.** They live inside the history temporarily for one call, then are dropped when the pipeline rebuilds next turn.
 
-### 5.1 Persona block (`prompt.persona.LEMON_PROMPT`)
+### 5.1 Persona block (`prompts.LEMON_PROMPT`)
 
 Sections inside `<Who you are>` through `<forbidden words>`. Notable:
 
@@ -258,7 +258,7 @@ The block is ~5KB. It never changes between turns, so Anthropic-style prompt cac
 
 ### 5.2 Refreshed-per-turn blocks
 
-#### `<time_context>` (`prompt.time_context.get_time_context`)
+#### `<time_context>` (`prompts.get_time_context`)
 
 ```
 <time_context>
@@ -272,7 +272,7 @@ You've been talking for a bit now, around 18 minutes.
 
 Time buckets: morning (5-9), afternoon (10-16), evening (17-20), late night (21-23), very late night (0-4).
 
-#### `<internal_state>` (`storage.state.format_internal_state`)
+#### `<internal_state>` (`prompts.format_internal_state`)
 
 Rendered from the 6-field dict. Defaults in `storage.state.DEFAULT_STATE`:
 
@@ -281,13 +281,13 @@ Rendered from the 6-field dict. Defaults in `storage.state.DEFAULT_STATE`:
  "emotional_thread": None, "recent_activity": None, "disposition": "warm"}
 ```
 
-#### `<user_facts>` (`prompt.facts.format_user_facts`)
+#### `<user_facts>` (`prompts.format_user_facts`)
 
 Skipped entirely when the `facts` table is empty.
 
 ### 5.3 Pipeline-injected blocks
 
-#### `<user_emotion>` (`empathy.emotion.format_emotion_block`)
+#### `<user_emotion>` (`prompts.format_emotion_block`)
 
 ```
 <user_emotion>
@@ -299,7 +299,7 @@ What they probably want: feel heard, not solved
 
 Intensity word ladder: `<0.3 mild`, `<0.6 moderate`, `<0.85 strong`, else `very strong`.
 
-#### `<theory_of_mind>` (`empathy.tom.format_tom_block`)
+#### `<theory_of_mind>` (`prompts.format_tom_block`)
 
 ```
 <theory_of_mind>
@@ -309,7 +309,7 @@ Do: stay with it, ask one open question if anything
 </theory_of_mind>
 ```
 
-#### `<emotional_memory>` (`storage.memory.format_memory_block`)
+#### `<emotional_memory>` (`prompts.format_memory_block`)
 
 ```
 <emotional_memory>
@@ -318,7 +318,7 @@ Do: stay with it, ask one open question if anything
 </emotional_memory>
 ```
 
-Timestamps are humanized via `storage.memory._humanize_age`: `today`, `yesterday`, `N days ago`, `N weeks ago`, `N months ago`.
+Timestamps are humanized via `temporal.age.humanize_age`: `today`, `yesterday`, `N days ago`, `N weeks ago`, `N months ago`.
 
 ---
 
@@ -425,7 +425,7 @@ At import time the module:
 2. Calls `db.start_session()` once, records the resulting `session_id` globally.
 3. Loads the latest internal state via `storage.state.fresh_session_state()` (latest snapshot + session-start overrides).
 4. Builds an initial history via `session_context.initial_history` (persona + time_context + internal_state + optional facts block).
-5. Picks a random opener from `prompt.persona.LEMON_OPENERS`, appends it to `ctx.history` and logs it to `messages`.
+5. Picks a random opener from `prompts.LEMON_OPENERS`, appends it to `ctx.history` and logs it to `messages`.
 6. Reads `templates/index.html` into `_INDEX_HTML` once (not on every `GET /`).
 
 So the first-paint UI already has one assistant bubble in `/history` before the user sends anything.

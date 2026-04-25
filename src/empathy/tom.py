@@ -1,15 +1,14 @@
-"""Theory-of-Mind schema + validator + system-block formatter.
+"""Theory-of-Mind schema + validator.
 
-The LLM call itself lives in `user_read.py` (merged with emotion into
-a single pre-generation round-trip). This module keeps the default shape,
-the validator (`_validate`), and the `<theory_of_mind>` system-block formatter.
+The default shape, validator, and JSON parser. The LLM call lives in
+`user_read.py` (merged with emotion into a single pre-generation
+round-trip). The `<theory_of_mind>` system-block formatter lives in
+`prompts.py`.
 """
 import json
 from typing import Optional
 
 from llm.parse_utils import strip_json_fences
-
-TOM_TAG = "<theory_of_mind>"
 
 DEFAULT_TOM = {
     "feeling": None,
@@ -41,20 +40,3 @@ def _validate(parsed: dict) -> dict:
 def _parse(raw: str) -> dict:
     """Parse a raw LLM response string (optionally fenced) into the canonical dict."""
     return _validate(json.loads(strip_json_fences(raw)))
-
-
-def format_tom_block(tom: dict) -> str:
-    """Format the ToM result as a `<theory_of_mind>` system block."""
-    feeling = tom.get("feeling") or "unclear"
-    avoid = tom.get("avoid") or "(no specific guidance)"
-    helps = tom.get("what_helps") or "(no specific guidance)"
-
-    return f"""
-<theory_of_mind>
-A read on what the user actually needs right now. Use this as a guide; do not narrate it back.
-
-What they're feeling: {feeling}
-Don't: {avoid}
-Do: {helps}
-</theory_of_mind>
-""".strip()

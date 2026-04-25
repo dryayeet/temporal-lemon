@@ -6,11 +6,7 @@ import requests
 
 import config
 from config import OPENROUTER_HEADERS, OPENROUTER_URL
-
-# tag of the system block we want to mark cacheable. The persona prompt is
-# long (~5KB) and stable across turns — perfect cache hit. Time/state blocks
-# change every turn and stay uncached.
-PERSONA_TAG = "<Who you are>"
+from prompts import PERSONA_TAG  # marks the persona system block as cacheable
 
 
 def _wrap_for_cache(content: str) -> list[dict]:

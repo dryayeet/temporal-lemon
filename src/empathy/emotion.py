@@ -1,26 +1,14 @@
-"""Emotion schema + validator + system-block formatter.
+"""Emotion schema + validator.
 
-The LLM call itself lives in `user_read.py` (merged with theory-of-mind
-into a single pre-generation round-trip). This module keeps the label
-whitelist, the validator (`_validate`), the default shape, and the
-`<user_emotion>` system-block formatter.
+The label whitelist, default shape, validator, and JSON parser. The
+LLM call lives in `user_read.py` (merged with theory-of-mind into a
+single pre-generation round-trip). The `<user_emotion>` system-block
+formatter and the `EMOTION_LABELS` whitelist live in `prompts.py`.
 """
 import json
 
 from llm.parse_utils import strip_json_fences
-
-EMOTION_TAG = "<user_emotion>"
-
-# Label set inspired by GoEmotions but trimmed to what's discriminable in
-# friend-chat context. The classifier is asked to pick one.
-EMOTION_LABELS = [
-    "neutral", "joy", "excitement", "love", "gratitude",
-    "sadness", "loneliness", "disappointment", "grief",
-    "anger", "frustration", "annoyance",
-    "fear", "anxiety", "confusion",
-    "shame", "embarrassment", "guilt",
-    "tired", "amused", "curious",
-]
+from prompts import EMOTION_LABELS
 
 DEFAULT_EMOTION = {
     "primary": "neutral",
@@ -74,34 +62,3 @@ def _validate(parsed: dict) -> dict:
 def _parse(raw: str) -> dict:
     """Parse a raw LLM response string (optionally fenced) into the canonical dict."""
     return _validate(json.loads(strip_json_fences(raw)))
-
-
-def format_emotion_block(emotion: dict) -> str:
-    """Format an emotion dict as a `<user_emotion>` system block for injection."""
-    primary = emotion.get("primary", "neutral")
-    intensity = emotion.get("intensity", 0.0)
-    need = emotion.get("underlying_need")
-    undertones = emotion.get("undertones") or []
-
-    need_line = f"What they probably want: {need}" if need else "What they probably want: unclear"
-    undertone_line = (
-        f"Undertones: {', '.join(undertones)}" if undertones else "Undertones: none"
-    )
-    intensity_word = (
-        "mild" if intensity < 0.3
-        else "moderate" if intensity < 0.6
-        else "strong" if intensity < 0.85
-        else "very strong"
-    )
-
-    return f"""
-<user_emotion>
-A separate read of the user's last message before you reply. Treat this as background — do not name or quote it.
-
-Primary feeling: {primary} ({intensity_word}, intensity {intensity:.2f})
-{undertone_line}
-{need_line}
-
-Let this shape your tone, length, and whether to ask vs. acknowledge. Do not echo the label back.
-</user_emotion>
-""".strip()

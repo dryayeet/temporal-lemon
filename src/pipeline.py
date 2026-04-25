@@ -19,16 +19,22 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 import config
-from empathy.emotion import EMOTION_TAG, format_emotion_block
 from empathy.empathy_check import CheckResult, check_response
-from empathy.tom import TOM_TAG, format_tom_block
 from empathy.user_read import read_user
 from llm.chat import generate_reply
-from prompt.history import compress_history
+from prompt_stack import compress_history
+from prompts import (
+    CRITIQUE_TAG,
+    EMOTION_TAG,
+    MEMORY_TAG,
+    TOM_TAG,
+    format_critique_block,
+    format_emotion_block,
+    format_memory_block,
+    format_tom_block,
+)
 from storage import db
-from storage.memory import MEMORY_TAG, format_memory_block, relevant_memories
-
-CRITIQUE_TAG = "<empathy_retry>"
+from storage.memory import relevant_memories
 
 # Phase labels used by the SSE relay so the web UI can show "lemon is reading
 # you...", etc. CLI ignores them by default.
@@ -171,7 +177,7 @@ def run_empathy_turn(
     if not check.passed and config.EMPATHY_RETRY_ON_FAIL:
         if on_phase:
             on_phase(PHASE_REVISING)
-        retry_history = _inject_block(history, CRITIQUE_TAG, _critique_block(check, draft))
+        retry_history = _inject_block(history, CRITIQUE_TAG, format_critique_block(draft, check.critique))
         try:
             second = generate_reply(retry_history, model=model)
             if second.strip():
@@ -188,15 +194,3 @@ def run_empathy_turn(
     # in a background thread — see web.py / lem.py. Pipeline returns now so
     # the caller can deliver the reply to the user immediately.
     return final, trace
-
-
-def _critique_block(check: CheckResult, draft: str) -> str:
-    """Wrap a CheckResult critique as a system block for the regenerate call."""
-    snippet = draft[:200] + ("..." if len(draft) > 200 else "")
-    return f"""
-<empathy_retry>
-You just produced this draft: "{snippet}"
-
-{check.critique}
-</empathy_retry>
-""".strip()

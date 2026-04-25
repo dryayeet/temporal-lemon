@@ -159,10 +159,9 @@ from pathlib import Path
 
 import config
 from pipeline import run_empathy_turn
-from prompt.persona import LEMON_PROMPT
-from prompt.time_context import get_time_context
+from prompts import LEMON_PROMPT, format_internal_state, get_time_context
 from storage import db
-from storage.state import DEFAULT_STATE, format_internal_state
+from storage.state import DEFAULT_STATE
 
 
 def one_turn(user_msg: str, prior_turns: list[dict] | None = None) -> str:
