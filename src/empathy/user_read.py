@@ -13,9 +13,9 @@ from typing import Optional
 import requests
 
 from config import OPENROUTER_HEADERS, OPENROUTER_URL, STATE_MODEL
-from emotion import DEFAULT_EMOTION, EMOTION_LABELS, _validate as _validate_emotion
-from parse_utils import format_recent_for_prompt, strip_json_fences
-from tom import DEFAULT_TOM, _validate as _validate_tom
+from empathy.emotion import DEFAULT_EMOTION, EMOTION_LABELS, _validate as _validate_emotion
+from empathy.tom import DEFAULT_TOM, _validate as _validate_tom
+from llm.parse_utils import format_recent_for_prompt, strip_json_fences
 
 
 def _build_prompt(user_msg: str, recent_msgs: Optional[list[dict]]) -> str:

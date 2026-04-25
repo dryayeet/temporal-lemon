@@ -4,10 +4,10 @@ import pytest
 import requests
 
 import config
-import db
-import fact_extractor
 import pipeline
-from fact_extractor import _build_prompt, _parse, extract_facts
+from empathy import fact_extractor
+from empathy.fact_extractor import _build_prompt, _parse, extract_facts
+from storage import db
 
 
 # ---------- _parse ----------

@@ -1,15 +1,15 @@
 """Internal-state lifecycle: defaults, parsing, formatting, persistence.
 
-State persists in SQLite (see db.py). The chat loop loads the latest snapshot
-on startup and saves a new snapshot every time the state changes. The LLM
-call that nudges the state lives in `post_exchange.py` now (merged with
-fact extraction into a single post-generation round-trip).
+State persists in SQLite (see `storage/db.py`). The chat loop loads the latest
+snapshot on startup and saves a new snapshot every time the state changes.
+The LLM call that nudges the state lives in `empathy/post_exchange.py` (merged
+with fact extraction into a single post-generation round-trip).
 """
 import json
 from typing import Optional
 
-from db import latest_state, save_state_snapshot
-from parse_utils import strip_json_fences
+from llm.parse_utils import strip_json_fences
+from storage.db import latest_state, save_state_snapshot
 
 DEFAULT_STATE = {
     "mood": "neutral",          # neutral | good | low | happy | anxious | restless | tired | content

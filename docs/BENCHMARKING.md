@@ -50,7 +50,7 @@ Quick reference. Pick from here based on what you want to answer.
 | **TempReason** | Fact-based vs. context-based probing | Ceiling only | Raw Claude. Useful to show where context-based reasoning degrades. |
 | **TimeQA** | 14k+ Wikidata time-sensitive QA, Easy + Hard splits | Ceiling only | Raw Claude. |
 
-**Note:** lemon has explicit temporal-reasoning machinery (`<time_context>` block, `<rules_of_time>` prompt section, `time_context.py`), so in principle the stack could be tested on temporal benchmarks. In practice the benchmarks are MCQ and lemon's pipeline is not shaped for MCQ answering. If you want to show the temporal scaffolding helps, build a custom temporal-dialogue benchmark instead.
+**Note:** lemon has explicit temporal-reasoning machinery (`<time_context>` block, `<rules_of_time>` prompt section, `prompt/time_context.py`), so in principle the stack could be tested on temporal benchmarks. In practice the benchmarks are MCQ and lemon's pipeline is not shaped for MCQ answering. If you want to show the temporal scaffolding helps, build a custom temporal-dialogue benchmark instead.
 
 ### 2.3 Sources for each
 
@@ -158,14 +158,11 @@ from datetime import datetime
 from pathlib import Path
 
 import config
-import db
-from commands import ChatContext
-from facts import format_user_facts
-from history import replace_system_block
 from pipeline import run_empathy_turn
-from prompt import LEMON_PROMPT
-from state import DEFAULT_STATE, format_internal_state
-from time_context import get_time_context
+from prompt.persona import LEMON_PROMPT
+from prompt.time_context import get_time_context
+from storage import db
+from storage.state import DEFAULT_STATE, format_internal_state
 
 
 def one_turn(user_msg: str, prior_turns: list[dict] | None = None) -> str:
@@ -196,7 +193,6 @@ def one_turn(user_msg: str, prior_turns: list[dict] | None = None) -> str:
         reply, _trace = run_empathy_turn(
             user_msg=user_msg,
             base_history=history,
-            energy=state["energy"],
             model=config.CHAT_MODEL,
             session_id=sid,
             keep_recent_turns=config.KEEP_RECENT_TURNS,

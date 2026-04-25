@@ -1,5 +1,5 @@
-import db
-from memory import format_memory_block, relevant_memories
+from storage import db
+from storage.memory import format_memory_block, relevant_memories
 
 
 def _seed_user_msg(session_id, content, emotion, intensity=0.5):

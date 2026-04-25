@@ -1,4 +1,4 @@
-import db
+from storage import db
 
 
 def test_session_lifecycle():

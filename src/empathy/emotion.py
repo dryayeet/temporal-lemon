@@ -7,7 +7,7 @@ whitelist, the validator (`_validate`), the default shape, and the
 """
 import json
 
-from parse_utils import strip_json_fences
+from llm.parse_utils import strip_json_fences
 
 EMOTION_TAG = "<user_emotion>"
 

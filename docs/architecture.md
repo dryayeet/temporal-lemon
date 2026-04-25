@@ -1,63 +1,61 @@
 # Architecture
 
-Lemon's design centers on one idea: a chatbot that *behaves* like a friend instead of *describing itself* as one. That goal pushes most of the complexity into context preparation rather than generation. The default model is Claude Haiku 4.5 on OpenRouter (`anthropic/claude-haiku-4.5`) for both the main chat and the auxiliary classifier / ToM / state-updater calls — cheap, fast, and supports prompt caching on the persona block.
+Lemon's design centers on one idea: a chatbot that *behaves* like a friend instead of *describing itself* as one. That goal pushes most of the complexity into context preparation rather than generation. The default model is Claude Haiku 4.5 on OpenRouter (`anthropic/claude-haiku-4.5`) for both the main reply and the merged pre-/post-generation classifier calls — cheap, fast, and supports prompt caching on the persona block.
 
 ## High level
 
 ```
-                    ┌────────────────────────────────────────────────┐
-                    │                   config.py                    │
-                    │   env, models, paths, knobs, HTTP headers      │
-                    └────────────────────────────────────────────────┘
-                                          │
-        ┌──────────┬───────────┬──────────┼──────────┬───────────┬──────────┐
-        ▼          ▼           ▼          ▼          ▼           ▼          ▼
-   prompt.py   time_…ctx   history.py  state.py   facts.py    db.py     chat.py
-   (persona)   (block)    (compress/   (load,      (block    (SQLite)  (caching,
-                          swap)         save,       from               streaming,
-                                        update)    facts.db)           pacing)
-                                          │
-                              ┌───────────┼───────────┐
-                              ▼           ▼           ▼
-                          emotion.py    tom.py     memory.py     ◀── empathy pipeline
-                          (classify)    (ToM)      (retrieve)
-                              │           │           │
-                              └───────────┼───────────┘
-                                          ▼
-                                    pipeline.py  ──▶  empathy_check.py
-                                    (orchestrator)    (sentiment-mirror)
-                                          │
-                                          ▼
-                                    commands.py  ◀──── chat loop
-                                    (slash dispatcher) (lem.py / web.py)
+                       ┌──────────────────────────────────────────┐
+                       │                 config.py                │
+                       │     env, models, paths, knobs, HTTP      │
+                       └──────────────────────────────────────────┘
+                                           │
+   ┌─────────────┬───────────────┬─────────┼─────────┬───────────────┬──────────────┐
+   ▼             ▼               ▼         ▼         ▼               ▼              ▼
+prompt/       empathy/          llm/              storage/       session_        pipeline.py
+(persona,     (emotion,        (chat,             (db,           context.py     (orchestrator:
+ time,         tom, check,     parse_utils)       memory,        (initial       read_user →
+ history,      user_read,                         state)         history,       memory → draft
+ facts)        post_exchange,                                    refresh,       → check → regen)
+               fact_extractor)                                   bookkeeping)
+                                                                      │
+                                                                      ▼
+                                                              lem.py / web.py
+                                                           + commands.py (slash)
 ```
 
 Two entry points, one core:
 
 - `lem.py` — terminal REPL.
-- `web.py` — FastAPI app + single-page HTML in `templates/index.html`. Exposes the same chat + slash-command + introspection surface over HTTP, plus a `/trace` endpoint for the last empathy-pipeline trace.
+- `web.py` — FastAPI app + single-page HTML in `templates/index.html`. Same chat + slash-command + introspection surface over HTTP, plus a `/trace` endpoint.
 
 ## What gets sent to the model each turn
 
-The empathy pipeline (`pipeline.run_empathy_turn`) prepares context, then calls the chat model. The full sequence per user message:
+`pipeline.run_empathy_turn` prepares context, then calls the chat model. Full sequence per user message:
 
 ```
 user_msg arrives
   │
   ▼
-[1] emotion classifier (Haiku)   →  {primary, intensity, undertones, underlying_need}
-  ▼                                  ↳ also stored on the message row in db
-[2] memory retrieval             →  past user messages with same emotion (other sessions)
+[1] merged pre-gen read (Haiku)   →  emotion {primary, intensity, undertones, underlying_need}
+    empathy.user_read.read_user      tom     {feeling, avoid, what_helps}
+  │                                  ↳ one LLM call, two output dicts
+  │                                  ↳ emotion also stored on the message row in db
   ▼
-[3] theory-of-mind pass (Haiku)  →  {feeling, avoid, what_helps}
+[2] memory retrieval              →  past user messages with same emotion (other sessions)
+    storage.memory.relevant_memories   — SQLite only, no LLM
   ▼
-[4] inject system blocks
+[3] inject system blocks
   ▼
-[5] main generation (chat model) →  buffered draft
+[4] main generation (chat model)  →  buffered draft via llm.chat.generate_reply
   ▼
-[6] sentiment-mirror check       →  pass? regenerate-once with critique?
+[5] sentiment-mirror check        →  12 regex detectors; pass? regenerate-once with critique?
   ▼
-final reply  →  played back token-by-token with humanize_delay
+final reply ships to user (SSE "token" + "done", or CLI print)
+  │
+  ▼
+[6] backgrounded bookkeeping (Haiku)  →  new_facts + nudged_state, merged into one call
+    empathy.post_exchange.bookkeep      — runs in a daemon thread AFTER the reply is delivered
 ```
 
 The message list sent to the chat model:
@@ -75,64 +73,61 @@ The message list sent to the chat model:
 N. user: <latest message>
 ```
 
-If `LEMON_PROMPT_CACHE=1` (Anthropic models only) the persona block is wrapped with `cache_control: ephemeral`. With the default OpenAI route, caching is automatic on the prefix — no code-side wrapping needed.
+If `LEMON_PROMPT_CACHE=1` (Anthropic models only) the persona block is wrapped with `cache_control: ephemeral`.
 
-The memory gradient (`history.compress_history`) keeps the most recent `KEEP_RECENT_TURNS` (default 8) verbatim and folds older turns into a single `<earlier_conversation>` summary block.
+The memory gradient (`prompt.history.compress_history`) keeps the most recent `KEEP_RECENT_TURNS` (default 8) verbatim and folds older turns into a single `<earlier_conversation>` summary block.
 
 ## State machine
 
-There are three pieces of persistent state in lemon:
+Three pieces of persistent state:
 
-1. **Internal state** — a 6-field dict (mood, energy, engagement, emotional_thread, recent_activity, disposition) describing how lemon feels right now. Updated by a small LLM call every `STATE_UPDATE_EVERY` exchanges. Persisted as a snapshot row in `state_snapshots`.
-
-2. **User facts** — a key/value table (`facts`) for things lemon should remember about the user. Populated via `/remember`. Loaded as a `<user_facts>` system block.
-
-3. **Emotion-tagged messages** — every user message gets an `emotion`, `intensity`, `salience` triple from the classifier. Stored on the `messages` row. Used by the memory-retrieval step to surface past moments that felt similar.
+1. **Internal state** — a 6-field dict (mood, energy, engagement, emotional_thread, recent_activity, disposition). Nudged every turn by the merged post-gen `bookkeep` call. Persisted as a snapshot row in `state_snapshots`.
+2. **User facts** — a key/value table (`facts`) for things lemon should remember across sessions. Populated by `/remember` and by `bookkeep`. Loaded as a `<user_facts>` system block each turn.
+3. **Emotion-tagged messages** — every user message gets an `emotion`, `intensity`, `salience` triple from the pre-gen read. Stored on the `messages` row. Used by memory-retrieval to surface past moments that felt similar.
 
 ## Update cadence
 
-| event                       | what runs                                                                                       |
-| --------------------------- | ----------------------------------------------------------------------------------------------- |
-| every user message          | empathy pipeline: classify → retrieve → ToM → draft → check                                     |
-| every user message          | refresh `<time_context>` + `<internal_state>` + `<user_facts>` system blocks                    |
-| every chat call             | buffered generation (so the post-check can run), then humanized replay through stdout/SSE       |
-| every `STATE_UPDATE_EVERY`  | call the cheap state-updater model with the latest exchange                                     |
-| state change                | save snapshot to `state_snapshots`                                                              |
-| every user message          | log row in `messages` with detected emotion fields                                              |
-| every assistant reply       | log row in `messages` (no emotion fields)                                                       |
-| session end                 | stamp `ended_at` in `sessions`                                                                  |
+| event                       | what runs                                                                       |
+| --------------------------- | ------------------------------------------------------------------------------- |
+| every user message          | empathy pipeline: user_read → retrieve → draft → check → optional retry         |
+| every user message          | refresh `<time_context>` + `<internal_state>` + `<user_facts>` system blocks    |
+| every user message          | log row in `messages` with detected emotion fields                              |
+| every assistant reply       | log row in `messages` (no emotion fields)                                       |
+| every user message          | daemon thread: `post_exchange.bookkeep` → upsert facts + save new state snapshot |
+| session end                 | stamp `ended_at` in `sessions`                                                  |
 
 ## Cost per turn
 
-With the default settings:
+| call                         | model                         | runs                     | rough cost |
+| ---------------------------- | ----------------------------- | ------------------------ | ---------- |
+| `user_read` (emotion + ToM)  | `anthropic/claude-haiku-4.5`  | every turn               | ~$0.0002   |
+| main chat                    | `anthropic/claude-haiku-4.5`  | every turn (+1 on retry) | varies; persona cached after turn 1 |
+| `bookkeep` (facts + state)   | `anthropic/claude-haiku-4.5`  | every turn, backgrounded | ~$0.0002   |
 
-| call                  | model                              | runs                     | rough cost              |
-| --------------------- | ---------------------------------- | ------------------------ | ----------------------- |
-| emotion classifier    | `anthropic/claude-haiku-4.5`       | every turn               | ~$0.0001                |
-| ToM pass              | `anthropic/claude-haiku-4.5`       | every turn               | ~$0.0002                |
-| main chat             | `anthropic/claude-haiku-4.5`       | every turn (+1 on retry) | depends on context size; persona cached |
-| state updater         | `anthropic/claude-haiku-4.5`       | every 2 turns            | ~$0.0001                |
+**User-perceived latency = 2 LLM calls.** Total cost = 3 per typical turn.
 
-The persona system block (~5KB, stable across every turn) is sent with `cache_control: ephemeral` on the main chat call, so after the first turn it's a cache hit. Auxiliary calls (emotion, ToM, state) are short single-shot prompts and don't benefit from caching.
-
-Disable the empathy pipeline entirely with `LEMON_EMPATHY=0` or `/empathy off` to drop back to one chat call per turn.
+Disable the empathy pipeline with `LEMON_EMPATHY=0` or `/empathy off` to drop to one user-facing chat call per turn (bookkeep still runs in the background).
 
 ## Why these design choices
 
-**SQLite, not JSON.** Multiple sessions over time, fact lookup, snapshot history, emotion-tagged retrieval — all relational concerns. SQLite gets these for free with no server.
+**SQLite, not JSON.** Multiple sessions over time, fact lookup, snapshot history, emotion-tagged retrieval — all relational concerns.
 
-**Buffer, then replay.** The post-check needs the full draft before it can decide whether to regenerate. Streaming raw tokens to the user would mean shipping a bad draft before the check runs. Buffer the generation, run the check, then replay tokens with humanized pacing. The web UI shows phase events ("reading you...", "thinking...", "rephrasing...") to fill the gap.
+**Buffer, then replay.** The post-check needs the full draft before deciding whether to regenerate. Buffer generation, run the check, then ship the final reply as a single SSE payload. Phase events fill the wait visually.
 
-**Auxiliary calls all on Haiku.** They produce structured JSON, not user-facing text, so a small fast model is appropriate. The main chat model can stay strong (GPT-5.4-mini) for the actual reply.
+**Merged classifiers.** The pre-generation read and the post-generation bookkeeping each used to be two separate LLM calls. Now they're one call apiece — both the pre-gen pair and the post-gen pair were hitting the same model with overlapping inputs. Halves the round-trips with negligible quality cost.
 
-**One process, one chat (web).** The web UI assumes the user is running it for themselves on localhost. No auth, single in-memory `ChatContext` guarded by a lock. Multi-user would need session cookies, per-user db rows, and per-user state.
+**Bookkeep in a daemon thread.** Post-reply work (fact extraction + state nudge) doesn't need to block the user. Fires after `done` is delivered, so user-perceived latency drops by whatever that call costs (~1-2s typical).
 
-**Pipeline is opt-out, not opt-in.** Default-on so first-time users see the value. `LEMON_EMPATHY=0` (or `/empathy off`) drops back to one chat call per turn with no code change.
+**Auxiliary calls all on Haiku.** They produce structured JSON, not user-facing text, so a small fast model is appropriate.
 
-**Pure functions where possible.** `parse_state_response`, `format_internal_state`, `compress_history`, `replace_system_block`, `humanize_delay`, `time_of_day_label`, `session_duration_note`, `check_response`, `format_emotion_block`, `format_tom_block`, `format_memory_block` — all take inputs and return outputs with no side effects. Trivially testable, and they're what most of the test suite covers.
+**One process, one chat (web).** The web UI assumes the user is running it for themselves on localhost. No auth, single in-memory `ChatContext` guarded by a lock.
+
+**Pipeline is opt-out, not opt-in.** Default-on so first-time users see the value.
+
+**Pure functions where possible.** Parsers, validators, formatters, compressors, regex detectors — all side-effect-free. Trivially testable and that's what most of the test suite covers.
 
 ## Adding a feature
 
-The pattern: most new features land as a new module in `src/` plus a test file in `tests/`. The `commands.py` registry exposes anything user-controllable as a slash command without touching the loop. The web UI inherits new commands automatically — no client-side changes needed.
+Most new features land as a new module in the appropriate package (`prompt/`, `empathy/`, `llm/`, or `storage/`) plus a test file in `tests/`. The `commands.py` registry exposes anything user-controllable as a slash command without touching the loop — the web UI inherits new commands automatically.
 
-For empathy-pipeline extensions specifically (e.g. best-of-N, RAG, multi-agent critic — see `docs/empathy_research.md` Tier 2/3), edit `pipeline.run_empathy_turn` and add the step in the right spot. The trace dataclass auto-surfaces in `/why` and `/trace` for any new field you add to it.
+For empathy-pipeline extensions specifically (e.g. best-of-N, RAG, multi-agent critic — see `docs/empathy_research.md` Tier 2/3), edit `pipeline.run_empathy_turn` and add the step in the right spot. The trace dataclass auto-surfaces in `/why` and `/trace` for any new field you add.

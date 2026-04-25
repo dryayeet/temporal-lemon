@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 
-from parse_utils import strip_json_fences
+from llm.parse_utils import strip_json_fences
 
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 _MAX_VALUE_LEN = 200

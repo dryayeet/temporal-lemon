@@ -7,7 +7,7 @@ the validator (`_validate`), and the `<theory_of_mind>` system-block formatter.
 import json
 from typing import Optional
 
-from parse_utils import strip_json_fences
+from llm.parse_utils import strip_json_fences
 
 TOM_TAG = "<theory_of_mind>"
 

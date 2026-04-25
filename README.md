@@ -62,31 +62,41 @@ pytest
 
 ```
 src/
-  config.py           env, models, knobs, paths, HTTP headers
-  prompt.py           persona prompt + opener pool
-  time_context.py     time-of-day + session-duration system block
-  history.py          memory gradient + system-block swap helper
-  state.py            internal state: defaults, load/save/format + validator
-  facts.py            user-facts system block formatter
-  db.py               SQLite: sessions, messages (with emotion fields), snapshots, facts
-  commands.py         slash-command registry + dispatcher
-  chat.py             OpenRouter reply call: prompt caching + SSE streaming
-  parse_utils.py      shared fence-stripper + recent-msgs prompt formatter
-  emotion.py          emotion schema, validator, system-block formatter
-  tom.py              theory-of-mind schema, validator, system-block formatter
-  fact_extractor.py   fact-key regex + value-hygiene validator
-  user_read.py        merged pre-gen LLM call: emotion + theory-of-mind in one round-trip
-  post_exchange.py    merged post-gen LLM call: fact extraction + state nudge in one round-trip
-  memory.py           emotion-tagged retrieval from db
-  empathy_check.py    sentiment-mirror post-check (regex / heuristics)
-  pipeline.py         orchestrates read_user → memory → draft → check → regen-once
-  session_context.py  shared helpers for CLI + web: initial history, refresh blocks, bookkeeping thread
-  lem.py              CLI entry point
-  web.py              FastAPI app (chat, commands, introspection, /trace)
+  config.py              env, models, knobs, paths, HTTP headers
+  pipeline.py            orchestrates read_user → memory → draft → check → regen-once
+  session_context.py     shared CLI+web helpers: initial history, refresh blocks, bg bookkeeping
+  commands.py            slash-command registry + dispatcher
+  lem.py                 CLI entry point
+  web.py                 FastAPI app (chat, commands, introspection, /trace)
+
+  prompt/                system-prompt content lemon reads
+    persona.py           the persona prompt + opener pool
+    time_context.py      time-of-day + session-duration block
+    history.py           memory gradient + system-block swap helper
+    facts.py             <user_facts> system block formatter
+
+  empathy/               the empathy pipeline's specialised building blocks
+    emotion.py           emotion schema, validator, system-block formatter
+    tom.py               theory-of-mind schema, validator, system-block formatter
+    fact_extractor.py    fact-key regex + value-hygiene validator
+    empathy_check.py     sentiment-mirror post-check (regex, 12 detectors)
+    user_read.py         merged pre-gen LLM call: emotion + ToM in one round-trip
+    post_exchange.py     merged post-gen LLM call: fact extraction + state nudge
+
+  llm/                   raw LLM wire + parsing helpers
+    chat.py              OpenRouter reply call: prompt caching + SSE streaming
+    parse_utils.py       shared fence-stripper + recent-msgs prompt formatter
+
+  storage/               persistence + retrieval
+    db.py                SQLite: sessions, messages (with emotion fields), snapshots, facts
+    memory.py            emotion-tagged message retrieval
+    state.py             internal state: defaults, load/save/format + validator
+
   templates/
-    index.html        single-page web UI
-tests/                pytest suite (most src modules)
-docs/                 architecture, slash commands, db schema, web UI, empathy research
+    index.html           single-page web UI
+
+tests/                   pytest suite (most src modules)
+docs/                    architecture, slash commands, db schema, web UI, empathy research
 ```
 
 Per-turn LLM cost: **3 calls** (`user_read` + reply + `post_exchange`), of which only the first two block the user — bookkeeping runs in a daemon thread after the reply ships. Retry on sentiment-mirror failure adds a fourth reply call.

@@ -3,8 +3,8 @@ import json
 import pytest
 import requests
 
-import emotion
-from emotion import (
+from empathy import emotion
+from empathy.emotion import (
     DEFAULT_EMOTION,
     EMOTION_LABELS,
     classify_emotion,

@@ -3,8 +3,8 @@ import json
 import pytest
 import requests
 
-import tom
-from tom import DEFAULT_TOM, format_tom_block, theory_of_mind
+from empathy import tom
+from empathy.tom import DEFAULT_TOM, format_tom_block, theory_of_mind
 
 
 # ---------- _parse ----------

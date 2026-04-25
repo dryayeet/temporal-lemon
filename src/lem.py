@@ -6,13 +6,13 @@ from typing import Optional
 
 import requests
 
-import db
 from commands import ChatContext, dispatch, is_command
 from config import CHAT_MODEL, KEEP_RECENT_TURNS
 from pipeline import recent_messages_for_context, run_empathy_turn
-from prompt import LEMON_OPENERS
+from prompt.persona import LEMON_OPENERS
 from session_context import initial_history, refresh_base_blocks, run_bookkeeping
-from state import fresh_session_state, save_state
+from storage import db
+from storage.state import fresh_session_state, save_state
 
 
 def main() -> None:

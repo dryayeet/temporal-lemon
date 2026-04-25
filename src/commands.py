@@ -11,8 +11,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 import config
-import db
-import state as state_mod
+from storage import db
+from storage import state as state_mod
 
 
 @dataclass

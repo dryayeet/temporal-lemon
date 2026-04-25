@@ -13,14 +13,14 @@ from datetime import datetime
 from typing import Optional
 
 import config
-import db
 from commands import ChatContext
-from facts import FACTS_TAG, format_user_facts
-from history import replace_system_block
-from post_exchange import bookkeep
-from prompt import LEMON_PROMPT
-from state import format_internal_state, save_state
-from time_context import get_time_context
+from empathy.post_exchange import bookkeep
+from prompt.facts import FACTS_TAG, format_user_facts
+from prompt.history import replace_system_block
+from prompt.persona import LEMON_PROMPT
+from prompt.time_context import get_time_context
+from storage import db
+from storage.state import format_internal_state, save_state
 
 
 def initial_history(internal_state: dict, session_start: datetime) -> list[dict]:

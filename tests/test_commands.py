@@ -1,6 +1,6 @@
-import db
 from commands import ChatContext, dispatch, is_command
-from state import DEFAULT_STATE
+from storage import db
+from storage.state import DEFAULT_STATE
 
 
 def make_ctx(**overrides):

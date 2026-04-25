@@ -10,13 +10,24 @@ This complements rather than replaces the existing docs. For narrative context s
 
 Lemon is a chat assistant styled as a friend, not a productivity tool. Implementation is a small Python codebase (~1.5k LoC in `src/`) with two frontends over one backend:
 
-- **Backend core:** per-turn "empathy pipeline" that runs four cheap LLM calls plus a regex-based post-check around a single main generation call.
-- **CLI:** `src/lem.py`, a stdin/stdout REPL with humanized output pacing.
+- **Backend core:** per-turn "empathy pipeline" that runs one merged pre-gen LLM call + one main reply call (+ optional retry) + one merged post-gen LLM call.
+- **CLI:** `src/lem.py`, a stdin/stdout REPL.
 - **Web:** `src/web.py`, FastAPI + a single hand-written HTML page + Server-Sent Events for streaming.
 - **Persistence:** one SQLite file with four tables (sessions, messages, state_snapshots, facts). Idempotent schema + migration table.
 - **Model layer:** OpenRouter as the HTTP target, Anthropic Claude Haiku 4.5 as the default for both main chat and auxiliary calls. Anthropic-style `cache_control` breakpoints on the persona block when the model supports it.
 
-Everything is synchronous. One process, one conversation at a time. No auth, no multi-user.
+Everything is synchronous on the critical path; post-gen bookkeeping runs in a daemon thread after the reply is delivered. One process, one conversation at a time. No auth, no multi-user.
+
+**Per-turn LLM budget:**
+
+| call | role | blocks the user? |
+|---|---|---|
+| `user_read` (STATE_MODEL) | merged emotion + theory-of-mind | yes |
+| `generate_reply` (CHAT_MODEL) | the actual reply, streamed | yes |
+| `generate_reply` (retry, conditional) | regenerate on empathy-check failure | yes, rare |
+| `bookkeep` (STATE_MODEL) | merged fact extraction + state nudge | **no** — backgrounded |
+
+**User-perceived wait = 2 LLM calls.** Total cost = 3 per typical turn (4 when retry fires).
 
 ---
 
@@ -40,12 +51,13 @@ All parsed in `src/config.py` at import time. Override any of them via `.env` or
 |---|---|---|
 | `OPENROUTER_API_KEY` | (required) | raises `ValueError` at import if missing |
 | `LEMON_CHAT_MODEL` | `anthropic/claude-haiku-4.5` | main generation model |
-| `LEMON_STATE_MODEL` | `anthropic/claude-haiku-4.5` | emotion classifier, ToM, state updater |
+| `LEMON_STATE_MODEL` | `anthropic/claude-haiku-4.5` | pre-gen read + post-gen bookkeeping |
 | `LEMON_PROMPT_CACHE` | auto (`1` for `anthropic/*`, else `0`) | wrap persona block in `cache_control: ephemeral` |
 | `LEMON_EMPATHY` | `1` | master switch for the pipeline |
 | `LEMON_EMPATHY_RETRY` | `1` | regenerate once when the post-check fails |
 | `LEMON_MEMORY_LIMIT` | `3` | how many matching-emotion memories to inject |
-| `LEMON_HUMANIZE` | `1` | per-token typing pacing |
+| `LEMON_AUTO_FACTS` | `1` | enable post-exchange fact extraction + state nudge |
+| `LEMON_AUTO_FACTS_MAX` | `3` | max facts stored per turn |
 | `LEMON_DB` | `.lemon.db` | SQLite file path (gitignored) |
 
 ### 2.3 In-code constants (not env-settable)
@@ -53,16 +65,7 @@ All parsed in `src/config.py` at import time. Override any of them via `.env` or
 From `src/config.py`:
 
 ```python
-STATE_UPDATE_EVERY  = 2         # run state updater every N exchanges
-KEEP_RECENT_TURNS   = 8         # before compress_history folds older turns
-HUMANIZE_BASE_SECONDS = 0.018   # base per-token delay, scaled by energy
-HUMANIZE_PUNCT_PAUSE  = 0.18    # extra pause after . ! ? ,
-```
-
-From `src/chat.py`:
-
-```python
-ENERGY_SPEED_MULT = {"low": 1.45, "medium": 1.0, "high": 0.7}   # state → pacing
+KEEP_RECENT_TURNS = 8           # before compress_history folds older turns
 ```
 
 ### 2.4 HTTP wiring
@@ -77,7 +80,7 @@ OPENROUTER_HEADERS = {
 }
 ```
 
-Every LLM call in the codebase uses this single endpoint and header dict.
+Three modules call this endpoint: `llm/chat.py`, `empathy/user_read.py`, `empathy/post_exchange.py`.
 
 ---
 
@@ -85,106 +88,112 @@ Every LLM call in the codebase uses this single endpoint and header dict.
 
 ```
 src/
-  config.py         env, models, paths, knobs, HTTP headers
-  prompt.py         persona system-prompt string + opener pool
-  time_context.py   <time_context> block generator
-  facts.py          <user_facts> block formatter
-  state.py          internal state: load, save, format, parse, update
-  history.py        replace_system_block + compress_history
-  db.py             SQLite layer: schema, migrations, all read/write helpers
-  chat.py           OpenRouter call, cache wrap, streaming, humanize pacing
-  emotion.py        pre-generation user-emotion classifier
-  tom.py            theory-of-mind side pass
-  memory.py         emotion-tagged memory retrieval + formatting
-  empathy_check.py  regex-based post-check (5 detectors)
-  pipeline.py       orchestrator: the "empathy pipeline"
-  commands.py       slash-command registry + ChatContext + dispatcher
-  lem.py            CLI REPL entry point
-  web.py            FastAPI app + SSE + introspection endpoints
+  config.py              env, models, paths, knobs, HTTP headers
+  pipeline.py            orchestrator: the "empathy pipeline"
+  session_context.py     shared CLI+web helpers: initial history, refresh blocks, bookkeeping thread
+  commands.py            slash-command registry + ChatContext + dispatcher
+  lem.py                 CLI REPL entry point
+  web.py                 FastAPI app + SSE + introspection endpoints
+
+  prompt/                system-prompt content lemon reads
+    persona.py           persona system-prompt string + opener pool
+    time_context.py      <time_context> block generator
+    history.py           replace_system_block + compress_history
+    facts.py             <user_facts> block formatter
+
+  empathy/               empathy-pipeline-specific logic
+    emotion.py           emotion schema, validator, <user_emotion> formatter
+    tom.py               theory-of-mind schema, validator, <theory_of_mind> formatter
+    fact_extractor.py    fact-key regex + value-hygiene validator
+    empathy_check.py     12-detector regex post-check
+    user_read.py         merged pre-gen LLM call (emotion + ToM)
+    post_exchange.py     merged post-gen LLM call (facts + state nudge)
+
+  llm/                   raw LLM wire + parsing helpers
+    chat.py              OpenRouter reply call, cache wrap, streaming
+    parse_utils.py       shared fence-stripper + recent-msgs prompt formatter
+
+  storage/               persistence + retrieval
+    db.py                SQLite layer: schema, migrations, CRUD helpers
+    memory.py            emotion-tagged message retrieval + <emotional_memory> formatter
+    state.py             internal state: defaults, load/save/format + validator
+
   templates/
-    index.html      single-page web UI (vanilla JS, inline CSS)
-tests/              one test file per src/ module + conftest.py
-docs/               architecture, slash commands, db schema, web ui, empathy research
+    index.html           single-page web UI (vanilla JS, inline CSS)
+tests/                   one test file per src/ module + conftest.py
+docs/                    architecture, slash commands, db schema, web ui, empathy research
 ```
 
-Dependency direction flows left-to-right:
+Dependency direction flows top-to-bottom:
 
 ```
 config ──► everything
-db ──► state, memory, commands, pipeline, web.py, lem.py
-chat ──► pipeline, web.py, lem.py
-emotion + tom + memory + empathy_check ──► pipeline
-history + prompt + time_context + facts + state ──► web.py, lem.py
-commands ──► lem.py, web.py
-pipeline ──► lem.py, web.py
+storage/db ──► storage/state, storage/memory, commands, pipeline, session_context
+llm/parse_utils ──► empathy/{emotion,tom,fact_extractor}, storage/state, empathy/{user_read,post_exchange}
+llm/chat ──► pipeline
+empathy/* ──► pipeline, session_context
+prompt/* ──► session_context
+commands + session_context + pipeline ──► lem.py, web.py
 ```
 
-There are no cycles. Tests are fully isolated via an autouse `isolated_db()` fixture in `tests/conftest.py`.
+There are no cycles. Tests are isolated via an autouse `isolated_db()` fixture in `tests/conftest.py`.
 
 ---
 
 ## 4. Per-turn request lifecycle
 
-This is the full path a single user message takes. Numbered callouts are the LLM calls.
+Full path a single user message takes. Numbered callouts are the LLM calls.
 
 ```
 user types a message
   │
   ▼
-[refresh base blocks]  CLI: lem.refresh_base_blocks()
-                       web: _refresh_base_blocks()
-  replaces <time_context>, <internal_state>, <user_facts>
-  system blocks (positions 1, 2, 3) via history.replace_system_block.
+[refresh base blocks]  session_context.refresh_base_blocks()
+  replaces <time_context>, <internal_state>, <user_facts> at positions
+  1/2/3 via prompt.history.replace_system_block.
   │
   ▼
 if is_command(user_input):
-    dispatch(user_input, ctx) ──► system bubble; no LLM call; return
+    commands.dispatch(user_input, ctx) ──► system bubble; no LLM call; return
   │
   ▼
 pipeline.run_empathy_turn(user_msg, base_history, ...)
   │
   ├── if ENABLE_EMPATHY_PIPELINE is False:
-  │     append user_msg + compress_history + (1) generate_reply + return
+  │     append user_msg + compress_history + (R) generate_reply + return
   │
-  ├── recent = _recent_messages_for_context(base_history, n=6)
+  ├── recent = recent_messages_for_context(base_history, n=6)
   │
-  ├── (1) emotion = emotion.classify_emotion(user_msg, recent)       [STATE_MODEL]
-  │       returns {primary, intensity, undertones, underlying_need}
+  ├── (1) emotion, tom = empathy.user_read.read_user(user_msg, recent)   [STATE_MODEL]
+  │       one call, returns both dicts
   │       phase: "reading you"
   │       db.log_message(user_msg, emotion=..., intensity=..., salience=intensity)
   │
-  ├── memories = memory.relevant_memories(emotion.primary,           [SQLite only]
+  ├── memories = storage.memory.relevant_memories(emotion.primary,       [SQLite only]
   │                  current_session_id, limit=MEMORY_RETRIEVAL_LIMIT)
   │       phase: "remembering"
   │       skipped when primary == "neutral"
-  │
-  ├── (2) tom = tom.theory_of_mind(user_msg, emotion, recent)         [STATE_MODEL]
-  │       returns {feeling, avoid, what_helps}
-  │       phase: "thinking"
   │
   ├── history = base_history, then:
   │     - _inject_block(<emotional_memory>, memories)   if memories
   │     - _inject_block(<user_emotion>, emotion_block)
   │     - _inject_block(<theory_of_mind>, tom_block)
-  │     each insertion drops any prior block with the same tag and
-  │     re-inserts it right after the leading contiguous system run.
   │
   ├── history.append({role: user, content: user_msg})
-  ├── history = history.compress_history(history, keep_recent=8)
+  ├── history = compress_history(history, keep_recent=8)
   │
-  ├── (3) draft = chat.generate_reply(history, model)                 [CHAT_MODEL]
+  ├── (R) draft = llm.chat.generate_reply(history, model)                 [CHAT_MODEL]
   │       phase: "replying"
-  │       buffered (non-streaming from caller's POV) because the
-  │       post-check needs the full reply before anything is shown.
+  │       buffered — post-check needs the full reply
   │
-  ├── check = empathy_check.check_response(user_msg, draft, emotion)
-  │       five regex detectors. Pure Python, no LLM call.
+  ├── check = empathy.empathy_check.check_response(user_msg, draft, emotion)
+  │       12 regex detectors. Pure Python, no LLM call.
   │
   ├── final = draft
   │   if not check.passed and EMPATHY_RETRY_ON_FAIL:
   │       phase: "rephrasing"
   │       retry_history = _inject_block(<empathy_retry>, critique_block)
-  │       (4) second = chat.generate_reply(retry_history)            [CHAT_MODEL]
+  │       (R') second = llm.chat.generate_reply(retry_history)            [CHAT_MODEL]
   │       if second.strip(): final = second; trace.regenerated = True
   │
   └── db.log_message(assistant, final); return (final, trace)
@@ -193,15 +202,16 @@ pipeline.run_empathy_turn(user_msg, base_history, ...)
 caller (web._stream_reply or lem.main):
   - ctx.last_trace = trace
   - append user_msg + final to ctx.history
-  - replay `final` token-by-token via re_split_keep_whitespace, sleeping
-    humanize_delay(token, energy) between chunks.
-    CLI: print to stdout; web: yield SSE "token" event.
-  - every STATE_UPDATE_EVERY exchanges:
-      (5) ctx.internal_state = state.update_internal_state(state, user, reply)  [STATE_MODEL]
-      db.save_state_snapshot(...)
+  - deliver the reply (SSE token+done, or CLI print)
+  - spawn daemon thread:
+      (2) new_facts, new_state = empathy.post_exchange.bookkeep(            [STATE_MODEL]
+             user_msg, final, existing_facts, current_state, recent, model)
+          db.upsert_fact(...) for each new_fact
+          ctx.internal_state = new_state
+          db.save_state_snapshot(...)
 ```
 
-**Total per turn:** 3 LLM calls guaranteed (emotion, ToM, main), +1 if `/empathy off` was toggled (just main), +1 if the post-check fails (retry), +1 every second turn (state updater). All auxiliary calls use `STATE_MODEL`; only the main draft and retry use `CHAT_MODEL`.
+**Total per turn:** 2 LLM calls on the user-facing critical path (user_read + reply), +1 in the background (post-gen bookkeeping), +1 if the post-check fails (retry). With `/empathy off`: 1 main call on the critical path + 1 backgrounded bookkeep.
 
 ---
 
@@ -225,31 +235,30 @@ The `messages` list passed to OpenRouter for the main chat call:
 
 Key invariants:
 
-- **Order of injection is deterministic.** `_inject_block` drops any prior block with the same tag, then inserts the new content just after the leading contiguous block of system messages. So re-running the pipeline on the same base history produces the same shape.
-- **`time_context` + `internal_state` + `user_facts` change every turn** and by construction live at positions 1, 2, 3 (managed by `replace_system_block` in `history.py`).
+- **Order of injection is deterministic.** `_inject_block` drops any prior block with the same tag, then inserts the new content just after the leading contiguous block of system messages.
+- **`time_context` + `internal_state` + `user_facts` change every turn** and by construction live at positions 1, 2, 3 (managed by `replace_system_block` in `prompt.history`).
 - **Persona block never changes.** That is what makes the cache hit work.
 - **Emotion/ToM/Memory blocks are pipeline-scoped.** They live inside the history temporarily for one call, then are dropped when the pipeline rebuilds next turn.
 
-### 5.1 Persona block (`prompt.LEMON_PROMPT`)
+### 5.1 Persona block (`prompt.persona.LEMON_PROMPT`)
 
-Sections inside `<Who you are>` through `<forbidden words>`. The model is told explicitly never to emit the tag names. Notable sections:
+Sections inside `<Who you are>` through `<forbidden words>`. Notable:
 
 - `<Who you are>`: role definition (friend, not assistant, no gender).
 - `<Voice and tone rules>`: WhatsApp-register constraints.
-- `<internal_state_instructions>`: tells the model how to read the state block (not to narrate it, let it leak through).
+- `<internal_state_instructions>`: how to read the state block without narrating it.
 - `<time_aware_personality>`: tone rules per time-of-day and session length.
-- `<time_awareness>`: anticipation-nudge rule for upcoming events the user mentioned.
 - `<rules_of_time>`: irreversibility, causality, duration-asymmetry axioms.
 - `<language mirroring>`: Hinglish-default, match user's language.
 - `<conversation rules>`: "only respond to what the user said", no unsolicited advice, short by default.
 - `<formatting>`: no hyphens, no lists, keep messages flowing.
 - `<forbidden words>`: negative-list ("Vibe", "quiet", "great to see you", "What is on your mind").
 
-The block is ~5KB. It never changes between turns, so Anthropic-style prompt caching on the persona block is effectively free after the first call.
+The block is ~5KB. It never changes between turns, so Anthropic-style prompt caching is effectively free after the first call.
 
 ### 5.2 Refreshed-per-turn blocks
 
-#### `<time_context>` (`time_context.get_time_context`)
+#### `<time_context>` (`prompt.time_context.get_time_context`)
 
 ```
 <time_context>
@@ -261,61 +270,36 @@ You've been talking for a bit now, around 18 minutes.
 </time_context>
 ```
 
-Time buckets: morning (5-9), afternoon (10-16), evening (17-20), late night (21-23), very late night (0-4). Duration bucket text depends on elapsed minutes.
+Time buckets: morning (5-9), afternoon (10-16), evening (17-20), late night (21-23), very late night (0-4).
 
-#### `<internal_state>` (`state.format_internal_state`)
+#### `<internal_state>` (`storage.state.format_internal_state`)
 
-Rendered from the 6-field dict:
-
-```
-<internal_state>
-...
-Mood: content
-Energy: medium
-Engagement level: deep
-What's on your mind: curious about exam result
-What you've been up to: nothing worth mentioning
-Disposition toward this person right now: warm
-...
-</internal_state>
-```
-
-Defaults in `state.DEFAULT_STATE`:
+Rendered from the 6-field dict. Defaults in `storage.state.DEFAULT_STATE`:
 
 ```python
 {"mood": "neutral", "energy": "medium", "engagement": "normal",
  "emotional_thread": None, "recent_activity": None, "disposition": "warm"}
 ```
 
-#### `<user_facts>` (`facts.format_user_facts`)
-
-```
-<user_facts>
-...
-  college_year: second
-  city: Bangalore
-...
-</user_facts>
-```
+#### `<user_facts>` (`prompt.facts.format_user_facts`)
 
 Skipped entirely when the `facts` table is empty.
 
 ### 5.3 Pipeline-injected blocks
 
-#### `<user_emotion>` (`emotion.format_emotion_block`)
+#### `<user_emotion>` (`empathy.emotion.format_emotion_block`)
 
 ```
 <user_emotion>
 Primary feeling: sadness (moderate, intensity 0.52)
 Undertones: loneliness, tired
 What they probably want: feel heard, not solved
-Let this shape your tone, length, and whether to ask vs. acknowledge. Do not echo the label back.
 </user_emotion>
 ```
 
 Intensity word ladder: `<0.3 mild`, `<0.6 moderate`, `<0.85 strong`, else `very strong`.
 
-#### `<theory_of_mind>` (`tom.format_tom_block`)
+#### `<theory_of_mind>` (`empathy.tom.format_tom_block`)
 
 ```
 <theory_of_mind>
@@ -325,7 +309,7 @@ Do: stay with it, ask one open question if anything
 </theory_of_mind>
 ```
 
-#### `<emotional_memory>` (`memory.format_memory_block`)
+#### `<emotional_memory>` (`storage.memory.format_memory_block`)
 
 ```
 <emotional_memory>
@@ -334,41 +318,26 @@ Do: stay with it, ask one open question if anything
 </emotional_memory>
 ```
 
-Timestamps are humanized via `memory._humanize_age`: `today`, `yesterday`, `N days ago`, `N weeks ago`, `N months ago`.
+Timestamps are humanized via `storage.memory._humanize_age`: `today`, `yesterday`, `N days ago`, `N weeks ago`, `N months ago`.
 
 ---
 
-## 6. The three auxiliary LLM calls
+## 6. Merged pre-gen call — `empathy.user_read.read_user`
 
-All three go through OpenRouter with `STATE_MODEL` (Haiku by default), `temperature` and `max_tokens` tuned per task. All three tolerate failure by returning a safe default rather than propagating an exception, so a dropped auxiliary call downgrades the run silently rather than breaking the chat.
+One LLM round-trip that returns `(emotion_dict, tom_dict)` — replacing two separate calls that used to fire sequentially.
 
-### 6.1 Emotion classifier (`emotion.classify_emotion`)
+- Model: `STATE_MODEL`. `temperature=0.3`, `max_tokens=500`.
+- Input: the user message + last ~6 non-system turns.
+- Output: a single JSON object with `"emotion"` and `"tom"` sub-dicts.
+- Parsing: `llm.parse_utils.strip_json_fences` → `json.loads` → split sub-dicts → `empathy.emotion._validate(dict)` + `empathy.tom._validate(dict)` (no re-dumping).
+- Fallback: `(DEFAULT_EMOTION, DEFAULT_TOM)` on any failure. Chat never dies because this call choked.
+- Side effect: the user message row in `messages` is written with `emotion`, `intensity`, and `salience=intensity` populated by the pipeline after this call returns.
 
-- Model call params: `temperature=0.2`, `max_tokens=250`.
-- Labels: 21-label set (neutral, joy, excitement, love, gratitude, sadness, loneliness, disappointment, grief, anger, frustration, annoyance, fear, anxiety, confusion, shame, embarrassment, guilt, tired, amused, curious).
-- Parser tolerates fenced code blocks.
-- Fallback: `{"primary":"neutral","intensity":0.3,"underlying_need":None,"undertones":[]}`.
-- Side effect: the user message row in `messages` is written with `emotion`, `intensity`, and `salience=intensity` fields populated.
-
-### 6.2 Theory of mind (`tom.theory_of_mind`)
-
-- Model call params: `temperature=0.4`, `max_tokens=350`.
-- Consumes the emotion output + last ~6 non-system turns.
-- Output shape: `{feeling, avoid, what_helps}`, each a short string or `None`.
-- Fallback: all three fields `None`.
-- Phrased internally as "quiet observer" so the model does not draft a reply.
-
-### 6.3 State updater (`state.update_internal_state`)
-
-- Model call params: `temperature=0.3`, `max_tokens=400`.
-- Runs only every `STATE_UPDATE_EVERY` exchanges (default 2).
-- Prompt emphasises "subtle nudges, not dramatic shifts". Mood and energy shift slowly, `recent_activity` is only set when the conversation causally grounds it.
-- Failure: return the old state unchanged. Chat never dies because the state updater choked.
-- Persisted via `db.save_state_snapshot` (new row per update).
+The two module-level validators (`_validate` in both `empathy/emotion.py` and `empathy/tom.py`) enforce the label whitelist, intensity clamp, short-string coercion, etc. Each `_parse(raw)` in those modules is now a thin wrapper over `_validate(json.loads(strip_json_fences(raw)))`, kept in case anything wants to parse a raw string directly.
 
 ---
 
-## 7. Main chat call (`chat.py`)
+## 7. Main chat call — `llm/chat.py`
 
 ### 7.1 Shape
 
@@ -384,7 +353,7 @@ payload = {
 }
 ```
 
-Temperature + top_p come from the v2 tuning pass (see `temporal_reasoning.txt`): 0.75 produces natural variance without going off-prompt. `frequency_penalty=0.2` prevents "I hear you, that's so valid" style phrase-stacking.
+`frequency_penalty=0.2` suppresses "I hear you, that's so valid" style phrase-stacking.
 
 ### 7.2 Prompt caching (`prepare_messages`)
 
@@ -396,149 +365,150 @@ Only runs if `ENABLE_PROMPT_CACHE` is true. It wraps the persona block into Anth
               "cache_control": {"type": "ephemeral"}}]}
 ```
 
-Any system message containing `<Who you are>` (matched by `PERSONA_TAG`) is wrapped. Everything else stays as a plain string, so other system blocks go uncached. After the first call, the persona is a cache hit on the Anthropic side, so subsequent turns pay roughly zero cost for those 5KB of prompt.
+Any system message containing `<Who you are>` (matched by `PERSONA_TAG`) is wrapped. Everything else stays as a plain string, so other system blocks go uncached. After the first call, the persona is a cache hit on the Anthropic side — subsequent turns pay roughly zero cost for those 5KB.
 
-### 7.3 Streaming vs buffering
+### 7.3 Streaming
 
-Two paths in `chat.py`:
+Two entry points:
+- `iter_chat(history, model)` — generator yielding content deltas from the SSE upstream.
+- `generate_reply(history, model)` — buffered, concatenates `iter_chat` output. Used by the empathy pipeline so the post-check can run on a complete string.
 
-- **`generate_reply`** (buffered): calls `iter_chat` and concatenates all deltas. Used by the empathy pipeline's draft + retry phases so the post-check can run on a complete string.
-- **`stream_chat`** (streamed): for CLI paths that bypass the pipeline. Prints each delta as it arrives.
-
-The web UI combines both: the backend buffers to run the check, then re-streams the final reply back to the browser token-by-token via SSE with pacing (see §9.3).
-
-### 7.4 Humanize pacing (`humanize_delay`)
-
-Per-token delay in seconds:
-
-```
-base  = HUMANIZE_BASE_SECONDS * ENERGY_SPEED_MULT[energy]      # 0.018 × {1.45, 1.0, 0.7}
-delay = base * uniform(0.5, 1.5)
-if token ends in ".!?," : delay += HUMANIZE_PUNCT_PAUSE * mult * uniform(0.7, 1.3)
-```
-
-So a tired (`energy: low`) lemon types ~45% slower, and punctuation adds a ~180 ms pause scaled by the same factor. Disabled entirely when `LEMON_HUMANIZE=0`.
-
-### 7.5 Tokenisation for replay
-
-`re_split_keep_whitespace(text)` splits on whitespace and keeps trailing whitespace attached to the prior chunk:
-
-- Input: `"hey that's rough.\n\ndo you want to talk?"`
-- Output: `["hey ", "that's ", "rough.\n\n", "do ", "you ", "want ", "to ", "talk?"]`
-
-Two places consume this: `chat.play_tokens` (CLI) and `web._stream_reply` (SSE). Because the frontend splits bubbles on `\n\n`, it matters that whitespace stays attached to the prior chunk so `\n\n` arrives as one SSE `token` event, not split across two.
+The web UI buffers via `generate_reply`, then delivers the full reply in one SSE `token` event followed by `done`.
 
 ---
 
-## 8. Empathy post-check (`empathy_check.py`)
+## 8. Empathy post-check — `empathy/empathy_check.py`
 
-Pure Python, regex-based, zero LLM cost. Runs after the main draft. Five detectors, each returns a critique string or `None`:
+Pure Python, regex-based, zero LLM cost. Runs after the main draft. **12 detectors** as of the robustness pass:
 
-| detector | fires when | example trigger |
-|---|---|---|
-| `minimizing` | draft matches `MINIMIZING` regex | "at least", "could be worse", "you'll be fine", "just a..." |
-| `toxic_positivity` | draft matches `TOXIC_POSITIVITY` regex | "positive vibes", "stay strong", "silver lining", "this too shall pass" |
-| `advice_pivot` | draft starts with `ADVICE_PIVOT` regex **and** user emotion in `NEGATIVE_EMOTIONS` **and** intensity ≥ 0.5 | "you should", "try to", "why don't you", "have you tried" |
-| `polarity_mismatch` | draft starts with `CHEERY_OPENERS` **and** user emotion in `NEGATIVE_EMOTIONS` **and** intensity ≥ 0.4 | opens "haha", "nice", "sweet", "awesome" while user is sad |
-| `validation_cascade` | draft contains ≥ 3 `CASCADE_PHRASES` | "I hear you... that makes sense... your feelings are valid..." |
-
-`NEGATIVE_EMOTIONS = {sadness, loneliness, disappointment, grief, anger, frustration, annoyance, fear, anxiety, shame, embarrassment, guilt, tired}`.
+| detector | fires when |
+|---|---|
+| `minimizing` | substring match on `MINIMIZING` OR sentence-start "at least" |
+| `toxic_positivity` | cliché phrases ("silver lining", "on the bright side", "the good news is", etc.) |
+| `advice_pivot` | draft *opens* with advice pattern AND user emotion is negative, intensity ≥ 0.5 |
+| `polarity_mismatch` | draft *opens* with cheery opener AND user emotion is negative, intensity ≥ 0.4 |
+| `validation_cascade` | 3+ validation phrases anywhere, OR 2+ in the first 80 chars |
+| `therapy_speak` | clinical labeling ("sounds like anxiety", "textbook trauma", "you're catastrophizing") |
+| `self_centering` | distress-gated opener centering responder's reaction ("i wish i could fix this for you") |
+| `sycophancy` | agreement inflation ("great question", "you're so right", "couldn't agree more") |
+| `false_equivalence` | responder-centering comparisons ("that happened to me too", "when i went through this") |
+| `lecturing` | "what you need to realize", "the important thing is" |
+| `performative_empathy` | "my heart goes out", "sending hugs", "i'm holding space for you" |
+| `question_stacking` | 3+ question marks in one reply AND user emotion is negative, intensity ≥ 0.5 |
 
 A failed check produces a `CheckResult` with a combined `critique` string. The pipeline wraps it in an `<empathy_retry>` system block (via `pipeline._critique_block`) that also quotes the first 200 chars of the failed draft, and re-calls `generate_reply` once. On success `trace.regenerated = True`; on failure or empty second draft, lemon ships the original.
 
 ---
 
-## 9. Web app (`web.py`)
+## 9. Merged post-gen call — `empathy.post_exchange.bookkeep`
 
-### 9.1 Startup
+One LLM round-trip after the reply is delivered. Returns `(new_facts, nudged_state)`.
+
+- Model: `STATE_MODEL`. `temperature=0.2`, `max_tokens=500`.
+- Input: the user message + bot reply + existing facts dict + current state dict + last ~6 turns.
+- Output: a single JSON object with `"facts"` and `"state"` sub-dicts.
+- Parsing: strip fences → split → validate via `empathy.fact_extractor._validate` and `storage.state.validate_state`.
+- Runs in a daemon thread from both `web.py::_stream_reply` and `lem.py::main`. See `session_context.run_bookkeeping`.
+- Failure: returns `({}, current_state)` and logs to stdout. Never blocks or breaks the chat.
+
+**The user never waits for this call.** The reply is delivered first; bookkeeping follows. On clean CLI exit, `lem.py` joins the final bookkeeping thread (timeout 10s) so the last state write isn't lost.
+
+---
+
+## 10. Web app — `web.py`
+
+### 10.1 Startup
 
 At import time the module:
 
 1. Creates a `FastAPI` instance and a `threading.Lock()` for serialising access to the shared ChatContext.
 2. Calls `db.start_session()` once, records the resulting `session_id` globally.
-3. Loads the latest internal state via `state.load_state()`.
-4. Builds an initial history (persona + time_context + internal_state + optional facts block).
-5. Picks a random opener from `prompt.LEMON_OPENERS`, appends it to `ctx.history` and logs it to `messages`.
+3. Loads the latest internal state via `storage.state.fresh_session_state()` (latest snapshot + session-start overrides).
+4. Builds an initial history via `session_context.initial_history` (persona + time_context + internal_state + optional facts block).
+5. Picks a random opener from `prompt.persona.LEMON_OPENERS`, appends it to `ctx.history` and logs it to `messages`.
+6. Reads `templates/index.html` into `_INDEX_HTML` once (not on every `GET /`).
 
 So the first-paint UI already has one assistant bubble in `/history` before the user sends anything.
 
-### 9.2 Endpoints
+### 10.2 Endpoints
 
 | method | path | returns |
 |---|---|---|
-| GET  | `/`         | `templates/index.html` |
-| POST | `/chat`     | `text/event-stream` (SSE, see §9.3) |
+| GET  | `/`         | `templates/index.html` (cached at startup) |
+| POST | `/chat`     | `text/event-stream` (SSE, see §10.3) |
 | POST | `/command`  | `{"output": "...", "exit": bool}` |
 | GET  | `/state`    | current internal state dict |
 | GET  | `/facts`    | `{key: value, ...}` from `facts` table |
 | GET  | `/sessions` | last 20 sessions with msg counts |
 | GET  | `/history`  | non-system messages in the current in-memory session |
-| GET  | `/trace`    | the last `PipelineTrace` serialised (emotion, tom, memories count, check result, regenerated flag) |
+| GET  | `/trace`    | the last `PipelineTrace` serialised |
 | GET  | `/docs`     | FastAPI's auto-generated OpenAPI explorer |
 
-`/chat` and `/command` are strict about what they accept: `/chat` rejects slash commands with HTTP 400, `/command` rejects non-slash input the same way.
+### 10.3 SSE protocol for `/chat`
 
-### 9.3 SSE protocol for `/chat`
-
-Each event is a single line: `data: <json>\n\n`. The JSON always has two fields, `event` and `data`. Events:
+Each event is `data: <json>\n\n`. The JSON always has `event` and `data`. Events:
 
 | event | meaning |
 |---|---|
-| `phase` | pipeline phase label for the typing indicator: `"reading you"`, `"remembering"`, `"thinking"`, `"replying"`, `"rephrasing"` |
-| `token` | a content delta to append to the current assistant bubble |
+| `phase` | pipeline phase label for the typing indicator: `"reading you"`, `"remembering"`, `"replying"`, `"rephrasing"` |
+| `token` | the full reply body (delivered as one chunk after the pipeline completes) |
 | `done`  | the full aggregated reply, emitted once at end |
 | `error` | a string describing the upstream failure |
 
-Timing shape: phases are yielded first in bursts (the pipeline finishes server-side before any token goes out); tokens then stream at humanized pace via `time.sleep(humanize_delay(chunk, energy))` between chunks.
+Phase events are buffered during `run_empathy_turn` and flushed before `token`. Consecutive duplicates are deduped so the UI doesn't see `"reading you"` twice when the pipeline fires it as its first phase.
 
-### 9.4 Frontend (`templates/index.html`)
+Bookkeeping fires in a daemon thread **after** the `done` SSE event is yielded.
 
-Single HTML file, all CSS inline, vanilla JS (no bundler). Key functions:
+### 10.4 Frontend (`templates/index.html`)
+
+Single HTML file, all CSS inline, vanilla JS. Key functions:
 
 - `bubble(role, text)` renders one chat bubble; classes `you`, `lemon`, or `system`.
-- `typingIndicator()` returns `{el, setPhase}`; `setPhase(s)` rewrites the label to `"lemon is " + s`.
-- `streamChat(message)` POSTs to `/chat` and consumes the SSE stream. On the first `token` event, removes the typing indicator and opens a new lemon bubble. On every `token` event, splits on `\n\n` and opens a new bubble at each paragraph break (iMessage-style multi-bubble replies). Scrolls to bottom on each token.
-- `loadHistory()` populates on page load, splitting any past multi-paragraph assistant message on `\n\n` for visual consistency.
+- `typingIndicator()` returns `{el, setPhase}`; `setPhase(p)` picks a random phrase from a flat `PHASE_PHRASES` list (~45 ice-cream-themed phrases) and shows `"lemon is <phrase>"` with a cross-fade animation.
+- `streamChat(message)` POSTs to `/chat` and consumes the SSE stream. On the first `token` event, removes the typing indicator and opens a new lemon bubble. Splits on `\n\n` for iMessage-style multi-bubble replies.
 - `loadState/loadFacts/loadSessions` populate the sidebar.
-- `runCommand(text)` POSTs to `/command` and renders the response in a system bubble, then refreshes the sidebar.
-- `send()` routes `/`-prefixed input to `runCommand`, anything else to `streamChat`.
+- `runCommand(text)` POSTs to `/command` and renders the response in a system bubble.
 
-Styling uses CSS custom properties (`--bg`, `--chat-bg`, `--bubble-you`, `--bubble-lemon`, etc.), with a `prefers-color-scheme: dark` media query swapping the palette.
+Light/dark theme toggle via CSS custom properties (`:root[data-theme="dark"]`) with the saved preference applied before body paint to avoid a flash.
 
-### 9.5 Concurrency model
+### 10.5 Concurrency model
 
-`threading.Lock()` wraps every read/write of the shared `ChatContext`. A single `_exchange_count` module-global increments after each reply so the state updater runs on the correct cadence. The pipeline itself does not hold the lock: it receives an immutable snapshot of `base_history` and returns `(reply, trace)`. The lock re-engages only to append to `ctx.history` and run the state updater.
+`threading.Lock()` wraps every read/write of the shared `ChatContext` on both sides:
+- The SSE generator acquires the lock to snapshot `base_history`, then releases it during `run_empathy_turn`.
+- The bookkeeping daemon thread acquires the same lock before mutating `ctx.internal_state` or calling `db.upsert_fact`.
 
 Because the web server is meant for the user themselves (localhost), there is no per-user isolation. Running two browser tabs against the same server interleaves their messages into one conversation.
 
 ---
 
-## 10. CLI (`lem.py`)
+## 11. CLI — `lem.py`
 
 REPL loop:
 
 ```
-1. db.start_session(), load_state(), build initial history
+1. db.start_session(), fresh_session_state(), build initial history
 2. print a random opener, log it
 3. while not exit_requested:
      user_input = input("you: ")
      if is_command: dispatch; continue
-     base_history = refresh_base_blocks(ctx, session_start)
+     base_history = session_context.refresh_base_blocks(...)
      reply, trace = run_empathy_turn(user_input, base_history, ...)
      ctx.last_trace = trace
      append user + reply to ctx.history
-     play_tokens(reply, energy=state.energy)     # stdout with humanize pacing
-     every STATE_UPDATE_EVERY: update_internal_state + save_state
-4. finally: save_state + end_session(session_id)
+     print(f"lemon: {reply}\n")
+     spawn daemon thread: session_context.run_bookkeeping(...)
+4. finally:
+     last_bg.join(timeout=10)   # wait for last bookkeeping
+     save_state + end_session(session_id)
 ```
 
-Phase updates are printed inline as `  · reading you...`, `  · thinking...` etc, via an `on_phase` callback.
+Phase updates are printed inline as `  · reading you...`, `  · replying...` etc, via an `on_phase` callback.
 
 ---
 
-## 11. Slash commands (`commands.py`)
+## 12. Slash commands — `commands.py`
 
-Every command is a function decorated with `@command("name", "help text")`. The decorator appends to the module-level `_REGISTRY`. `dispatch(text, ctx)` parses `/name arg...` and invokes the handler. Both the CLI and `/command` endpoint call the same dispatcher; adding a new command works in both frontends with zero client-side changes.
+Every command is a function decorated with `@command("name", "help text")`. The decorator appends to the module-level `_REGISTRY`. `dispatch(text, ctx)` parses `/name arg...` and invokes the handler. Both the CLI and the `/command` endpoint call the same dispatcher; adding a new command works in both frontends with zero client-side changes.
 
 Current commands:
 
@@ -546,72 +516,60 @@ Current commands:
 |---|---|
 | `/help` | list all commands |
 | `/state` | print `ctx.internal_state` as JSON |
-| `/reset` | reset internal state to defaults, save snapshot; does not erase facts or history |
+| `/reset` | reset internal state to defaults, save snapshot |
 | `/facts` | list stored facts |
 | `/remember key=value` | `db.upsert_fact(key, value, source_session_id=...)` |
 | `/forget key` | `db.delete_fact(key)` |
-| `/history [n]` | last `n*2` messages from `ctx.history` (non-system), default n=5 |
+| `/history [n]` | last `n*2` messages from `ctx.history` (non-system) |
 | `/rewind` | pop the last two non-system messages from `ctx.history` |
 | `/model name` | set `ctx.chat_model = name` for this session only |
 | `/sessions` | `db.list_sessions(limit=10)` with msg counts |
-| `/empathy [on\|off]` | mutate `config.ENABLE_EMPATHY_PIPELINE`; no arg prints current status |
+| `/empathy [on\|off]` | mutate `config.ENABLE_EMPATHY_PIPELINE` |
 | `/why` | render `ctx.last_trace` as a human-readable summary |
-| `/quit` / `/exit` | set `ctx.exit_requested = True` |
+| `/quit` / `/exit` | set `ctx.exit_requested = True` (two decorators, one handler) |
 
-`/why` renders the same data that `/trace` returns as JSON, but pretty-printed. Example output:
-
-```
-last reply's pipeline trace:
-  emotion: sadness (intensity 0.65)
-           undertones: loneliness, tired
-           underlying need: feel heard, not solved
-  feeling:   tired and let down about the exam
-  avoid:     don't jump to advice
-  do:        stay with it, ask one open question
-  memories used: 2
-  post-check: passed
-```
+`/why` renders the same data that `/trace` returns as JSON, but pretty-printed.
 
 ---
 
-## 12. State layer
+## 13. State layer
 
 Three kinds of persistent state:
 
-### 12.1 Internal state (`state.py`)
+### 13.1 Internal state (`storage/state.py`)
 
-Six-field dict. Rendered into `<internal_state>` every turn. Nudged every `STATE_UPDATE_EVERY` exchanges by the state-updater LLM call. Persisted as a row in `state_snapshots` every time it changes. `state.load_state()` merges the saved snapshot with defaults so new fields added in code don't break old databases.
+Six-field dict. Rendered into `<internal_state>` every turn. Nudged every turn by the post-gen `bookkeep` call. Persisted as a row in `state_snapshots` whenever it changes.
 
-| field | type | space |
-|---|---|---|
-| `mood` | string | neutral, good, low, happy, anxious, restless, tired, content |
-| `energy` | string | low, medium, high |
-| `engagement` | string | low, normal, deep |
-| `emotional_thread` | string or None | free text, quiet background |
-| `recent_activity` | string or None | free text, only when conversation grounds it |
-| `disposition` | string | warm, normal, slightly reserved |
+| field | space |
+|---|---|
+| `mood` | neutral, good, low, happy, anxious, restless, tired, content |
+| `energy` | low, medium, high |
+| `engagement` | low, normal, deep |
+| `emotional_thread` | free text or None, quiet background |
+| `recent_activity` | free text or None, only when conversation grounds it |
+| `disposition` | warm, normal, slightly reserved |
 
-### 12.2 User facts
+### 13.2 User facts
 
-Key-value table. Upsert via `/remember`, delete via `/forget`. Rendered into the `<user_facts>` block every turn when non-empty. Facts persist across sessions.
+Key-value table. Upsert via `/remember` or `post_exchange.bookkeep`, delete via `/forget`. Rendered into the `<user_facts>` block every turn when non-empty. Facts persist across sessions.
 
-### 12.3 Emotion-tagged messages
+### 13.3 Emotion-tagged messages
 
-Every user message row gets `emotion`, `intensity`, and `salience` populated by the pipeline at log time (inside `pipeline.run_empathy_turn`, right after the classifier call). Assistant rows leave those three columns NULL. The emotion-tagged rows are what `memory.relevant_memories()` reads from via `db.find_messages_by_emotion`, filtered to user messages in other sessions.
+Every user message row gets `emotion`, `intensity`, and `salience` populated by the pipeline at log time (in `pipeline.run_empathy_turn`, right after the `user_read` call). Assistant rows leave those three columns NULL. `storage.memory.relevant_memories()` reads these rows via `db.find_messages_by_emotion`, filtered to user messages in other sessions.
 
 ---
 
-## 13. Database layer (`db.py`)
+## 14. Database layer — `storage/db.py`
 
-See `db_schema.md` for column-by-column details. Summary:
+See `db_schema.md` for column-by-column details.
 
 - Four tables: `sessions`, `messages`, `state_snapshots`, `facts`. Plus `schema_version` for migration bookkeeping.
 - Idempotent schema: `CREATE TABLE IF NOT EXISTS` on every connect.
 - Migrations are a list of `(version, [SQL statements])`. On connect, any `version > current` is applied. "duplicate column name" errors are swallowed because fresh databases already have the column from the base SCHEMA.
-- Every helper opens a short-lived connection via `@contextmanager connect()`, runs one statement set, commits, closes. Foreign keys on, WAL off.
-- Every helper accepts an optional `path=` argument so tests can point at a per-test tmp file. The `isolated_db()` autouse fixture in `conftest.py` monkeypatches `config.DB_PATH` to a `tmp_path` per test.
+- Every helper opens a short-lived connection via `@contextmanager connect()`.
+- Every helper accepts an optional `path=` argument so tests can point at a per-test tmp file.
 
-Access pattern (user-facing helpers, all in `db.py`):
+Access pattern (user-facing helpers):
 
 ```
 start_session() → int
@@ -619,9 +577,7 @@ end_session(sid)
 list_sessions(limit)
 
 log_message(sid, role, content, emotion=, intensity=, salience=)
-session_messages(sid)
 find_messages_by_emotion(emotion, exclude_session_id=, limit=)
-find_recent_messages(limit=)
 
 latest_state() → dict | None
 save_state_snapshot(state, session_id=)
@@ -629,86 +585,67 @@ save_state_snapshot(state, session_id=)
 upsert_fact(key, value, source_session_id=)
 get_facts() → dict[str, str]
 delete_fact(key)
-clear_facts()
 ```
 
 ---
 
-## 14. History compression (`history.py`)
+## 15. History compression — `prompt/history.py`
 
 Two helpers, both pure functions:
 
 ### `replace_system_block(history, tag, content, position)`
 
-Drops any existing system message whose content contains `tag`, inserts a new one at `position`. Used by the CLI and web-UI base-block refresh to rewrite the `<time_context>`, `<internal_state>`, and `<user_facts>` blocks each turn without letting them accumulate.
+Drops any existing system message whose content contains `tag`, inserts a new one at `position`. Used by the base-block refresh each turn.
 
 ### `compress_history(history, keep_recent)`
 
-Memory gradient. Separates system vs conversation messages. If conversation turns exceed `keep_recent`, everything older is joined into a single system block tagged `<earlier_conversation>` with role-prefixed lines, inserted right after the leading system blocks. The `keep_recent` most recent turns stay verbatim. Below threshold, the history passes through unchanged.
-
-Format of the summary block:
-
-```
-<earlier_conversation>
-Here is a rough record of what was said earlier in this chat. It is not recent
-but it is part of your shared history with this person. Reference it only if
-it comes up naturally, not to fill silence.
-
-User: ...
-Assistant: ...
-User: ...
-</earlier_conversation>
-```
-
-Runs once per turn, right before the main generation call.
+Memory gradient. If conversation turns exceed `keep_recent`, older turns fold into a single system block tagged `<earlier_conversation>` with role-prefixed lines, inserted right after the leading system blocks. The `keep_recent` most recent turns stay verbatim.
 
 ---
 
-## 15. Cost profile
+## 16. Cost profile
 
 Default knobs, Haiku everywhere:
 
 | call | frequency | rough cost/turn |
 |---|---|---|
-| emotion classifier | every turn | ~$0.0001 |
-| ToM pass | every turn | ~$0.0002 |
+| `user_read` (merged emotion + ToM) | every turn | ~$0.0002 |
 | main chat (draft) | every turn | varies with context size; persona cached after turn 1 |
 | main chat (retry) | only on post-check fail | same as draft |
-| state updater | every `STATE_UPDATE_EVERY` turns (default 2) | ~$0.0001 |
+| `bookkeep` (merged facts + state) | every turn, backgrounded | ~$0.0002 |
 
-Per-turn ceiling with pipeline on: ~3 auxiliary Haiku calls + 1 main Haiku call. With `/empathy off`: 1 main call. No fine-tuning, no local inference, no GPU at all.
+Per-turn ceiling with pipeline on: 3 Haiku calls (2 user-blocking). With `/empathy off`: 1 main call user-blocking + 1 backgrounded bookkeep.
 
 ---
 
-## 16. Testing
+## 17. Testing
 
 Layout mirrors `src/`: one `tests/test_<module>.py` per source file. `tests/conftest.py` provides:
 
 ```python
 @pytest.fixture(autouse=True)
 def isolated_db(tmp_path, monkeypatch):
-    """Point config.DB_PATH at a per-test temporary file."""
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
 ```
 
-So every test gets a fresh SQLite file with the schema already migrated. LLM calls are not mocked at the HTTP level; they are avoided by testing pure functions (`compress_history`, `format_emotion_block`, `parse_state_response`, `check_response`, `humanize_delay`, `time_of_day_label`, etc.) and by injecting fake response dicts where the shape matters.
+So every test gets a fresh SQLite file. LLM calls are not mocked at the HTTP level; the suite relies on pure-function tests for validators, formatters, history compression, detectors, time-context, and state CRUD. Coverage is partial; the new merged-call modules (`user_read`, `post_exchange`) don't yet have tests.
 
 Run:
 
 ```bash
 pip install -r requirements-dev.txt
-pytest               # all
-pytest tests/test_pipeline.py -v
+pytest
+pytest tests/test_empathy_check.py -v   # 46 tests, all green
 ```
 
 ---
 
-## 17. Observability
+## 18. Observability
 
 Two introspection surfaces:
 
-- **`/why`** (slash command): renders the last `PipelineTrace` as a human-readable summary. Available in both CLI and web UI.
-- **`/trace`** (HTTP GET): returns the same trace as JSON. Useful for the web UI to show a debug panel, or for external tooling.
+- **`/why`** (slash command): renders the last `PipelineTrace` as a human-readable summary.
+- **`/trace`** (HTTP GET): returns the same trace as JSON.
 
 `PipelineTrace` fields:
 
@@ -721,15 +658,16 @@ check:          CheckResult | None
 regenerated:    bool
 final:          str | None       # what lemon actually sent
 pipeline_used:  bool             # False when ENABLE_EMPATHY_PIPELINE was off
+facts_extracted: dict            # populated by the bookkeeping thread after the reply ships
 ```
 
-The trace is attached to `ctx.last_trace` after every reply and persists only in memory (not written to the DB).
+The trace is attached to `ctx.last_trace` after every reply and persists only in memory. `facts_extracted` appears after a brief delay — bookkeeping runs post-reply.
 
 ---
 
-## 18. Extending the system
+## 19. Extending the system
 
-### 18.1 Add a slash command
+### 19.1 Add a slash command
 
 Drop this into `src/commands.py`:
 
@@ -746,19 +684,18 @@ def _mood(ctx: ChatContext, args: str) -> CommandResult:
 
 Available immediately in both CLI and web UI. No client-side changes.
 
-### 18.2 Add a new system block
+### 19.2 Add a new system block
 
-1. Write a formatter (pure function, takes data, returns `f"<mytag>...</mytag>"`).
-2. Call it from `refresh_base_blocks` in both `lem.py` and `web.py`, or from the pipeline if it's empathy-pass-scoped, and feed it through `replace_system_block` or `_inject_block`.
-3. Pick a position: constant tags (refreshed each turn) live at 1-3; pipeline tags live after those.
+1. Write a formatter (pure function, takes data, returns `f"<mytag>...</mytag>"`). Place it in `prompt/` if it's refreshed per turn, or `empathy/` if it's pipeline-scoped.
+2. Call it from `session_context.refresh_base_blocks`, or from the pipeline via `_inject_block`.
 
-### 18.3 Add a pipeline step
+### 19.3 Add a pipeline step
 
-Edit `pipeline.run_empathy_turn`. Steps are short and interchangeable: classify → retrieve → ToM → inject → draft → check → optional retry. Adding a best-of-N sampler or a RAG step means inserting a call in the right place and extending `PipelineTrace` with new fields. `/why` and `/trace` pick up new trace fields automatically as long as you use `getattr(trace, ..., default)`.
+Edit `pipeline.run_empathy_turn`. Steps are interchangeable: read → retrieve → inject → draft → check → optional retry. Adding a RAG step or best-of-N sampler means inserting a call and extending `PipelineTrace` with new fields.
 
-### 18.4 Add a post-check detector
+### 19.4 Add a post-check detector
 
-Append to `empathy_check.DETECTORS`:
+Append to `empathy.empathy_check.DETECTORS`:
 
 ```python
 def _detect_my_thing(user_msg, draft, emotion):
@@ -768,31 +705,28 @@ def _detect_my_thing(user_msg, draft, emotion):
 DETECTORS.append(("my_thing", _detect_my_thing))
 ```
 
-No other changes needed. The critique is aggregated into the regenerate prompt automatically.
+### 19.5 Schema change
 
-### 18.5 Schema change
-
-1. Add the column to the `SCHEMA` script (so fresh DBs get it directly).
+1. Add the column to the `SCHEMA` script.
 2. Append `(N, ["ALTER TABLE ... ADD COLUMN ..."])` to `MIGRATIONS`.
-3. `LATEST_VERSION` is computed via `max(...)`, so it updates automatically.
-4. Bump any helper that reads or writes the new column.
+3. Bump any helper that reads or writes the new column.
 
 ---
 
-## 19. Known edges and limitations
+## 20. Known edges and limitations
 
 - **Single-user, single-process.** `web.py` keeps one global `ChatContext`. Two tabs against the same server share one conversation.
-- **No auth.** `web.py` is localhost-only by default (`host="127.0.0.1"`). Exposing it needs a reverse proxy + auth layer.
-- **SSE not resumable.** If the browser tab closes mid-stream the full reply was still generated server-side and logged to `messages`, so next `/history` call will include it. The user just does not see the tokens replay.
-- **Pipeline latency.** Three extra calls add ~1-2s to perceived latency. Phase labels soften this but it is real.
-- **Post-check is regex, not semantic.** Paraphrases of minimizing or validation-cascade phrases will slip through. Mitigations documented in `empathy_research.md` §2 (classifier-guided decoding, best-of-N judge) would tighten this.
-- **Emotion classifier labels are coarse.** 21-label taxonomy trimmed from GoEmotions. Fine-grained subtypes (`relief`, `contempt`, `pride`, etc.) are not distinguished.
-- **ToM pass does not see the memory block.** It consumes only the emotion + last ~6 turns. Feeding retrieved memories into ToM might sharpen it, at the cost of one more injection step.
-- **State updater runs on every second turn unconditionally.** Even when the exchange was trivial small-talk, we still pay the call. A cheap "is this exchange state-relevant?" filter would cut cost.
+- **No auth.** `web.py` is localhost-only by default (`host="127.0.0.1"`).
+- **Bookkeeping lag.** Facts and state nudges appear in `/facts` and `/state` a few seconds after the reply (post-gen thread is async). `/trace.facts_extracted` is populated after that thread finishes.
+- **SSE not resumable.** If the browser tab closes mid-stream the reply was still generated and logged; the user just doesn't see the replay.
+- **Post-check is regex, not semantic.** Paraphrases of minimizing or validation-cascade phrases will still slip through. See `empathy_research.md` §2 for semantic alternatives.
+- **Emotion classifier labels are coarse.** 21-label taxonomy trimmed from GoEmotions.
+- **ToM pass doesn't see the memory block.** It consumes only the emotion read + last ~6 turns.
+- **Some legacy test files are stale.** `test_emotion.py`, `test_fact_extractor.py`, `test_state.py`, `test_tom.py`, `test_chat.py`, plus parts of `test_pipeline.py` / `test_db.py` still reference pre-refactor symbols (`classify_emotion`, `update_internal_state`, etc.). They collect-error rather than run. The merged-call flow is covered by runtime smoke tests + `test_empathy_check.py` (46 tests).
 
 ---
 
-## 20. Quick reference
+## 21. Quick reference
 
 **Start a chat from scratch:**
 
@@ -828,36 +762,31 @@ LEMON_EMPATHY=0 python src/web.py
 /model anthropic/claude-sonnet-4.6
 ```
 
-**Per-test DB isolation:**
-
-```python
-def test_my_thing(isolated_db):   # autouse fixture kicks in
-    sid = db.start_session()
-    ...
-```
-
 ---
 
-## 21. File-by-file cheat sheet
+## 22. File-by-file cheat sheet
 
-| file | ~LoC | purpose |
-|---|---|---|
-| `config.py` | 50 | env vars, model IDs, knobs, HTTP headers |
-| `prompt.py` | 125 | persona prompt + opener pool |
-| `time_context.py` | 40 | `<time_context>` block generator |
-| `facts.py` | 20 | `<user_facts>` block formatter |
-| `state.py` | 120 | internal state CRUD + LLM updater |
-| `history.py` | 40 | `replace_system_block` + `compress_history` |
-| `db.py` | 280 | schema, migrations, CRUD helpers |
-| `chat.py` | 160 | OpenRouter call, cache wrap, humanize pacing |
-| `emotion.py` | 170 | classifier + `<user_emotion>` formatter |
-| `tom.py` | 140 | ToM pass + `<theory_of_mind>` formatter |
-| `memory.py` | 70 | emotion-tagged retrieval + `<emotional_memory>` formatter |
-| `empathy_check.py` | 170 | five post-check detectors |
-| `pipeline.py` | 200 | orchestrator: classify → retrieve → ToM → draft → check → retry |
-| `commands.py` | 220 | slash-command registry + 13 built-ins |
-| `lem.py` | 120 | CLI REPL |
-| `web.py` | 255 | FastAPI app + SSE + introspection |
-| `templates/index.html` | ~270 | single-page web UI |
-
-Total: ~2.5k LoC including tests.
+| file | purpose |
+|---|---|
+| `config.py` | env vars, model IDs, knobs, HTTP headers |
+| `pipeline.py` | orchestrator: `read_user → memory → draft → check → regen-once` |
+| `session_context.py` | `initial_history`, `refresh_base_blocks`, `run_bookkeeping` — shared CLI+web |
+| `commands.py` | slash-command registry + 12 built-ins |
+| `lem.py` | CLI REPL |
+| `web.py` | FastAPI app + SSE + introspection |
+| `prompt/persona.py` | persona prompt + opener pool |
+| `prompt/time_context.py` | `<time_context>` block generator |
+| `prompt/history.py` | `replace_system_block` + `compress_history` |
+| `prompt/facts.py` | `<user_facts>` block formatter |
+| `empathy/emotion.py` | emotion schema, `_validate`, `format_emotion_block` |
+| `empathy/tom.py` | ToM schema, `_validate`, `format_tom_block` |
+| `empathy/fact_extractor.py` | fact-key regex + `_validate` |
+| `empathy/empathy_check.py` | 12-detector post-check |
+| `empathy/user_read.py` | merged pre-gen LLM call |
+| `empathy/post_exchange.py` | merged post-gen LLM call |
+| `llm/chat.py` | OpenRouter reply call, cache wrap, streaming |
+| `llm/parse_utils.py` | shared fence-stripper + recent-msgs formatter |
+| `storage/db.py` | schema, migrations, CRUD helpers |
+| `storage/memory.py` | emotion-tagged retrieval + `<emotional_memory>` formatter |
+| `storage/state.py` | internal state: defaults, load/save/format + validator |
+| `templates/index.html` | single-page web UI |

@@ -1,6 +1,6 @@
 # SQLite schema
 
-One file (`.lemon.db` by default — override with `LEMON_DB`). Schema lives in `src/db.py` as a single `CREATE TABLE IF NOT EXISTS` script that runs on every connect, so the file self-migrates.
+One file (`.lemon.db` by default — override with `LEMON_DB`). Schema lives in `src/storage/db.py` as a single `CREATE TABLE IF NOT EXISTS` script that runs on every connect, so the file self-migrates.
 
 ## Tables
 
@@ -58,9 +58,11 @@ Upsert semantics: `INSERT ... ON CONFLICT(key) DO UPDATE`. Adding the same key t
 
 ## Access pattern
 
-Everything goes through helper functions in `db.py`:
+Everything goes through helper functions in `storage/db.py`:
 
 ```python
+from storage import db
+
 sid = db.start_session()                              # → int
 db.log_message(sid, "user", "hi", emotion="neutral", intensity=0.2)
 db.log_message(sid, "assistant", "hey")
@@ -71,11 +73,9 @@ db.end_session(sid)
 db.latest_state()                                # → dict | None
 db.list_sessions(limit=20)                       # → list[dict]
 db.get_facts()                                   # → dict[str, str]
-db.session_messages(sid)                         # → list[dict]
 db.find_messages_by_emotion("sadness",           # → list[dict]
                             exclude_session_id=sid,
                             limit=3)
-db.find_recent_messages(limit=6)                 # → list[dict]
 ```
 
 Every function takes an optional `path` argument that defaults to `config.DB_PATH` resolved at call time. Tests inject a per-test `tmp_path` via the autouse `isolated_db` fixture in `conftest.py`.

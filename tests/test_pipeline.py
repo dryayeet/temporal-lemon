@@ -3,9 +3,9 @@ import json
 import pytest
 
 import config
-import db
 import pipeline
 from pipeline import run_empathy_turn
+from storage import db
 
 
 # ---------- helpers ----------

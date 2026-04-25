@@ -1,4 +1,4 @@
-from facts import format_user_facts
+from prompt.facts import format_user_facts
 
 
 def test_empty_facts_returns_empty_string():

@@ -18,30 +18,32 @@ The app is single-process, single-user. There is no authentication. Don't expose
 
 | method | path         | purpose                                                                |
 | ------ | ------------ | ---------------------------------------------------------------------- |
-| GET    | `/`          | serves `templates/index.html`                                          |
+| GET    | `/`          | serves `templates/index.html` (cached at startup)                      |
 | POST   | `/chat`      | streams a chat reply. Body: `{"message": "..."}`. Returns SSE.         |
 | POST   | `/command`   | runs a slash command. Body: `{"text": "/help"}`. Returns JSON.         |
 | GET    | `/state`     | current internal state as JSON                                         |
 | GET    | `/facts`     | stored user facts as JSON                                              |
 | GET    | `/sessions`  | recent sessions (id, started_at, ended_at, msg_count)                  |
 | GET    | `/history`   | non-system messages from the current in-memory session                 |
+| GET    | `/trace`     | last `PipelineTrace` as JSON (emotion, ToM, memories, check, facts)    |
 | GET    | `/docs`      | FastAPI's auto-generated OpenAPI explorer                              |
 
 ## SSE protocol for `/chat`
 
-Each event line is `data: <json>\n\n`. The JSON has two fields:
+Each event line is `data: <json>\n\n`. The JSON always has `event` and `data`:
 
 ```jsonc
-{ "event": "token", "data": "hey " }   // a streamed text delta
-{ "event": "token", "data": "you" }
-{ "event": "token", "data": " good?" }
-{ "event": "done",  "data": "hey you good?" }   // final aggregated reply
-{ "event": "error", "data": "HTTP 401: ..." }   // sent if the upstream fails
+{ "event": "phase", "data": "reading you" }   // pipeline-phase label for the typing indicator
+{ "event": "phase", "data": "remembering" }
+{ "event": "phase", "data": "replying" }
+{ "event": "token", "data": "hey you good?" } // the full reply, one chunk
+{ "event": "done",  "data": "hey you good?" } // final aggregated reply
+{ "event": "error", "data": "HTTP 401: ..." } // sent if the upstream fails
 ```
 
-The frontend appends `token` events into a "lemon is typing" bubble and updates the sidebar state on `done`. Errors collapse the partial bubble and render a system message.
+Phase events are buffered server-side while the pipeline runs and flushed just before the token chunk. Consecutive duplicates are deduped. The `token` event carries the full reply body (we buffer server-side because the empathy post-check needs a complete draft before deciding whether to regenerate).
 
-Tokens are paced server-side (`humanize_delay`) so the perceived typing speed reflects lemon's `energy` state — a tired lemon types slower than an upbeat one.
+After `done` ships, a daemon thread runs the merged post-gen bookkeeping call; `/state`, `/facts`, and `/trace.facts_extracted` update within a few seconds.
 
 ## Frontend layout
 
@@ -56,7 +58,7 @@ The CSS auto-switches between light and dark themes via `prefers-color-scheme`.
 
 The current design assumes a single user. To go multi-user you would need:
 
-1. A `users` table in `db.py`, with a `user_id` foreign key on `sessions`, `state_snapshots`, `facts`, and `messages`.
+1. A `users` table in `storage/db.py`, with a `user_id` foreign key on `sessions`, `state_snapshots`, `facts`, and `messages`.
 2. Auth — even something basic like a signed cookie or the OpenRouter API key proxied through.
 3. A per-user `ChatContext` map in `web.py`, keyed by user id, instead of the single module-level `_ctx`.
 

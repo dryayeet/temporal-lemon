@@ -3,8 +3,8 @@ import json
 import pytest
 import requests
 
-import state
-from state import (
+from storage import state
+from storage.state import (
     DEFAULT_STATE,
     SESSION_START_OVERRIDES,
     format_internal_state,

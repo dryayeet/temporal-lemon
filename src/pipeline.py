@@ -19,14 +19,14 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 import config
-import db
-from chat import generate_reply
-from emotion import EMOTION_TAG, format_emotion_block
-from empathy_check import CheckResult, check_response
-from history import compress_history
-from memory import MEMORY_TAG, format_memory_block, relevant_memories
-from tom import TOM_TAG, format_tom_block
-from user_read import read_user
+from empathy.emotion import EMOTION_TAG, format_emotion_block
+from empathy.empathy_check import CheckResult, check_response
+from empathy.tom import TOM_TAG, format_tom_block
+from empathy.user_read import read_user
+from llm.chat import generate_reply
+from prompt.history import compress_history
+from storage import db
+from storage.memory import MEMORY_TAG, format_memory_block, relevant_memories
 
 CRITIQUE_TAG = "<empathy_retry>"
 

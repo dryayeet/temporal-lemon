@@ -1,4 +1,4 @@
-from empathy_check import check_response
+from empathy.empathy_check import check_response
 
 
 HIGH_SAD = {"primary": "sadness", "intensity": 0.8}

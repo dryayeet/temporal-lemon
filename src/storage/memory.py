@@ -7,7 +7,7 @@ sessions. Reads from the same `messages` table the chat loop writes to.
 from datetime import datetime
 from typing import Optional
 
-import db
+from storage import db
 
 MEMORY_TAG = "<emotional_memory>"
 

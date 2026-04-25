@@ -76,7 +76,7 @@ last reply's pipeline trace:
 you: /empathy off
 empathy pipeline: OFF
 ```
-Drops to one chat call per turn (no emotion classifier, no ToM, no post-check).
+Drops to one user-facing chat call per turn (skips `user_read`, memory retrieval, and the post-check). The backgrounded bookkeeping call still runs after each reply so facts/state keep accumulating.
 
 ## Adding your own command
 

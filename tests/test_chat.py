@@ -1,5 +1,5 @@
 import config
-from chat import humanize_delay, prepare_messages
+from llm.chat import humanize_delay, prepare_messages
 
 
 # ---------- prepare_messages ----------

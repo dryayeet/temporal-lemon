@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 
-from time_context import get_time_context, session_duration_note, time_of_day_label
+from prompt.time_context import get_time_context, session_duration_note, time_of_day_label
 
 
 def test_time_of_day_boundaries():
