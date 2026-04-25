@@ -2,9 +2,7 @@
 
 A chatbot that simulates a friend, not an assistant. Runs on OpenRouter (Claude Haiku 4.5 by default, with Anthropic-style prompt caching on the persona block). Keeps an internal emotional state, runs a per-turn empathy pipeline (merged emotion + theory-of-mind read → memory retrieval → draft → sentiment-mirror check → regenerate-once on failure), and auto-extracts durable facts + nudges its own state in a single post-reply bookkeeping call that runs in the background so the user never waits on it. Everything persists across sessions in SQLite.
 
-<p align="center">
-  <img src="src/static/lemon.png" alt="lemon" width="190" />
-</p>
+
 
 
 Two frontends share the same backend: a CLI REPL and a single-page web UI.
