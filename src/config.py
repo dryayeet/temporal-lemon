@@ -32,6 +32,17 @@ ENABLE_EMPATHY_PIPELINE = os.getenv("LEMON_EMPATHY", "1") not in ("0", "false", 
 EMPATHY_RETRY_ON_FAIL = os.getenv("LEMON_EMPATHY_RETRY", "1") not in ("0", "false", "no")
 MEMORY_RETRIEVAL_LIMIT = int(os.getenv("LEMON_MEMORY_LIMIT", "3"))
 
+# --- MEMORY COMPOSITE SCORING ---
+# Per-turn episodic retrieval combines four signals (lex / rec / int / emo).
+# Defaults follow the ClawMem / Generative-Agents shape but skew the emotion
+# weight up because empathy is the whole point. See docs/memory_architecture.md.
+MEMORY_W_LEXICAL    = float(os.getenv("LEMON_MEM_W_LEXICAL",    "0.40"))
+MEMORY_W_RECENCY    = float(os.getenv("LEMON_MEM_W_RECENCY",    "0.20"))
+MEMORY_W_INTENSITY  = float(os.getenv("LEMON_MEM_W_INTENSITY",  "0.15"))
+MEMORY_W_EMOTION    = float(os.getenv("LEMON_MEM_W_EMOTION",    "0.25"))
+MEMORY_HALF_LIFE_DAYS = float(os.getenv("LEMON_MEM_HALF_LIFE_DAYS", "30"))
+MEMORY_CANDIDATE_POOL = int(os.getenv("LEMON_MEM_POOL", "50"))
+
 # --- AUTO-FACT EXTRACTION ---
 ENABLE_AUTO_FACTS = os.getenv("LEMON_AUTO_FACTS", "1") not in ("0", "false", "no")
 AUTO_FACTS_MAX_PER_TURN = int(os.getenv("LEMON_AUTO_FACTS_MAX", "3"))

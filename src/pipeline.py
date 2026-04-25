@@ -177,7 +177,9 @@ def run_empathy_turn(
     log.info("event=phase_start turn=%s phase=%s", turn_id, PHASE_REMEMBERING)
     phase_started = time.time()
     memories = relevant_memories(
+        user_msg=user_msg,
         emotion=emotion.get("primary", "neutral"),
+        intensity=emotion.get("intensity", 0.0),
         current_session_id=session_id,
         limit=config.MEMORY_RETRIEVAL_LIMIT,
     )

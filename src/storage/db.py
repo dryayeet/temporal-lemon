@@ -61,6 +61,28 @@ CREATE TABLE IF NOT EXISTS facts (
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
 );
+
+-- Full-text-search index over messages.content. External-content table so
+-- the source of truth stays in `messages` and we don't pay storage twice.
+-- Porter tokenizer enables stemming (talk/talking/talked all match).
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    content,
+    content='messages',
+    content_rowid='id',
+    tokenize='porter unicode61'
+);
+
+-- Keep messages_fts in sync with messages. Standard external-content recipe.
+CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
+    INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+END;
 """
 
 # (target_version, [statements to bump TO that version]).
@@ -104,6 +126,27 @@ def _migrate(conn: sqlite3.Connection) -> None:
         )
 
 
+def _rebuild_fts_if_needed(conn: sqlite3.Connection) -> None:
+    """Backfill the FTS5 index for pre-existing message rows.
+
+    External-content FTS5 tables don't auto-populate from existing rows
+    (the triggers only catch new inserts), so any DB that predates the
+    FTS schema needs a one-shot `rebuild`. Cheap idempotent check: if
+    FTS rowcount lags behind messages, rebuild.
+    """
+    msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    if msg_count == 0:
+        return
+    fts_count = conn.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0]
+    if fts_count >= msg_count:
+        return
+    conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
+    log.info(
+        "event=db_fts_rebuilt msg_count=%d fts_count_before=%d",
+        msg_count, fts_count,
+    )
+
+
 @contextmanager
 def connect(path: Optional[Path] = None) -> Iterator[sqlite3.Connection]:
     """Yield a connection with foreign keys enabled, schema in place, and migrations applied."""
@@ -114,6 +157,7 @@ def connect(path: Optional[Path] = None) -> Iterator[sqlite3.Connection]:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
     _migrate(conn)
+    _rebuild_fts_if_needed(conn)
     conn.execute(
         "INSERT OR IGNORE INTO schema_version (version) VALUES (?)", (LATEST_VERSION,)
     )
@@ -211,6 +255,84 @@ def find_messages_by_emotion(
             emotion, exclude_session_id, limit, len(rows),
         )
         return [dict(r) for r in rows]
+
+
+def find_messages_by_fts(
+    fts_query: str,
+    exclude_session_id: Optional[int] = None,
+    candidate_pool: int = 50,
+    path: Optional[Path] = None,
+) -> list[dict]:
+    """Return user messages matching `fts_query` via FTS5, with BM25 scores.
+
+    `fts_query` follows the FTS5 syntax — typically a space- or OR-joined
+    list of stemmed tokens (`exam OR tuesday OR prep`). The composite
+    scorer in `storage/memory.py` consumes this candidate pool and
+    re-ranks with recency + intensity + emotion-relatedness.
+
+    BM25 in FTS5 is signed so that smaller-is-better; we expose the raw
+    value and let the scorer normalize. Limit is the *candidate pool* —
+    aim large here (50 is plenty) so the composite scorer has options.
+    """
+    sql = (
+        "SELECT m.id, m.session_id, m.role, m.content, m.created_at, "
+        "       m.emotion, m.intensity, m.salience, "
+        "       bm25(messages_fts) AS bm25 "
+        "FROM messages m "
+        "JOIN messages_fts ON messages_fts.rowid = m.id "
+        "WHERE messages_fts MATCH ? "
+        "  AND m.role = 'user' "
+    )
+    params: list = [fts_query]
+    if exclude_session_id is not None:
+        sql += "AND m.session_id != ? "
+        params.append(exclude_session_id)
+    sql += "ORDER BY bm25 LIMIT ?"
+    params.append(candidate_pool)
+
+    with connect(path) as c:
+        try:
+            rows = c.execute(sql, params).fetchall()
+        except sqlite3.OperationalError as e:
+            # Malformed FTS query (e.g. all stopwords got stripped to "").
+            log.warning("event=db_fts_query_invalid query=%r error=%r", fts_query, e)
+            return []
+    log.debug(
+        "event=db_fts_lookup query=%r exclude_session=%s pool=%d returned=%d",
+        fts_query, exclude_session_id, candidate_pool, len(rows),
+    )
+    return [dict(r) for r in rows]
+
+
+def find_recent_user_messages(
+    exclude_session_id: Optional[int] = None,
+    limit: int = 50,
+    path: Optional[Path] = None,
+) -> list[dict]:
+    """Recent user messages (newest first), used as fallback when FTS yields nothing.
+
+    Returned shape matches `find_messages_by_fts` minus the bm25 column,
+    so the composite scorer can still rank by recency / intensity /
+    emotion-relatedness.
+    """
+    sql = (
+        "SELECT id, session_id, role, content, created_at, emotion, intensity, salience "
+        "FROM messages WHERE role = 'user' "
+    )
+    params: list = []
+    if exclude_session_id is not None:
+        sql += "AND session_id != ? "
+        params.append(exclude_session_id)
+    sql += "ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+
+    with connect(path) as c:
+        rows = c.execute(sql, params).fetchall()
+    log.debug(
+        "event=db_recent_users exclude_session=%s limit=%d returned=%d",
+        exclude_session_id, limit, len(rows),
+    )
+    return [dict(r) for r in rows]
 
 
 # ---------- state snapshots ----------
