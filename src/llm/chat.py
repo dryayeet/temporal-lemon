@@ -102,6 +102,10 @@ def iter_chat(history: list[dict], model: Optional[str] = None) -> Iterator[str]
             raise RuntimeError(f"HTTP {response.status_code}: {body}")
 
         log.info("event=chat_response_open status=%d", response.status_code)
+        # OpenRouter sends `text/event-stream` with no charset; requests defaults
+        # to ISO-8859-1 in that case, which mojibake's any non-ASCII (emoji,
+        # accented chars, devanagari) into Latin-1 byte-per-char garbage.
+        response.encoding = "utf-8"
 
         chunks: list[str] = []
         try:
