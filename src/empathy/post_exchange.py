@@ -96,7 +96,10 @@ def bookkeep(
         facts_sub = parsed.get("facts") if isinstance(parsed.get("facts"), dict) else {}
         state_sub = parsed.get("state") if isinstance(parsed.get("state"), dict) else {}
 
-        new_facts = _validate_facts(facts_sub, max_new) if facts_sub else {}
+        new_facts = (
+            _validate_facts(facts_sub, max_new, existing_keys=existing.keys())
+            if facts_sub else {}
+        )
         new_state = validate_state(state_sub, fallback=state_in) if state_sub else state_in
 
         changed_state_keys = [k for k in DEFAULT_STATE if state_in.get(k) != new_state.get(k)]

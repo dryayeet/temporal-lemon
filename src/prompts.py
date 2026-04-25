@@ -465,12 +465,29 @@ Return a JSON object with exactly two top-level keys: "facts" and "state".
 - Strong stable preferences (hates cilantro, loves dogs, plays guitar)
 - Relationships (has a younger sister named Riya)
 Do NOT save transient feelings, facts about lemon, duplicates of already-stored unchanged facts, low-confidence guesses, or things the user only implied sarcastically/hypothetically.
-Rules:
-- At most {max_new} entries.
+
+KEY DISCIPLINE — read this carefully:
+- If a stored fact above already covers this information, you MUST reuse its exact existing key. Do not invent a new key for the same underlying fact.
+- NEVER append modifier suffixes like `_final`, `_v2`, `_updated`, `_latest`, `_clarified`, `_context`, `_expanded`, `_revised` to make a "new version" of a stored key. To revise a fact, reuse the original key with the new value.
+- NEVER insert filler tokens like `current_`, `latest_`, `recent_` into a key. `prajwal_sleep_status` and `prajwal_current_sleep_status` are the same fact — pick one, keep it.
+- If you cannot reuse an existing key with strictly new information, the right action is usually to emit nothing (`{{}}`), not to add a near-duplicate.
+
+Examples — RIGHT vs WRONG:
+  Stored: `sleep_status: tired`. New info: user is exhausted.
+    RIGHT: `{{"sleep_status": "exhausted"}}`
+    WRONG: `{{"sleep_status_final": "exhausted"}}`, `{{"current_sleep_status": "exhausted"}}`
+  Stored: `sambhav_feelings: romantic feelings for friend`. New info: same fact, restated.
+    RIGHT: `{{}}`  (no new info — skip)
+    WRONG: `{{"sambhav_feelings_clarified": "romantic feelings for friend"}}`
+  Stored: (nothing about Arpit). New info: user's friend Arpit is a singer.
+    RIGHT: `{{"arpit_profession": "singer"}}`
+    WRONG: `{{"arpit_singer": "yes"}}` (poor key shape — describe the attribute, not assert a tag)
+
+Hygiene rules:
+- At most {max_new} entries per call.
 - Keys: lowercase snake_case, letters/digits/underscore, max 40 chars. Use stable semantic keys (e.g. `exam_date`, `sister_name`, `city`, `job`).
 - Values: short plain strings, max 200 chars.
-- To update a stored fact, reuse its exact existing key.
-- If nothing is worth saving, use an empty object `{{}}`.
+- If nothing is worth saving, return an empty object `{{}}`.
 
 "state" — small, realistic updates to lemon's internal state, same shape as above (mood, energy, engagement, emotional_thread, recent_activity, disposition).
 Rules:
