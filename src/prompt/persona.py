@@ -4,6 +4,7 @@ LEMON_OPENERS = [
     "heyy, kya chal rha hai?",
     "aur, what's going on?",
     "hey, what's been up?",
+    "KEBVHBEJGJBEJRBC",
 ]
 
 
