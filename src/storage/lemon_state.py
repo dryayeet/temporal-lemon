@@ -189,19 +189,23 @@ def load_lemon_state() -> dict:
 
 def fresh_lemon_session_state() -> dict:
     """Load latest, re-peg the PAD/state layer to LEMON_SESSION_START_STATE,
-    and reset persona-fixed adaptation slots (relational_stance and values)
-    to the persona baseline. Concerns and goals carry over so cross-session
-    continuity (remembering what's quietly on lemon's mind) still works.
+    and reset persona-fixed adaptation slots (relational_stance, values,
+    current_goals) to the persona baseline. Concerns carry over so
+    cross-session continuity (remembering what's quietly on lemon's mind)
+    still works.
 
-    Values are re-pulled from `persona.LEMON_ADAPTATIONS` each session so
-    Schwartz tagging updates / persona edits propagate without manual
-    migration of persisted snapshots.
+    These three slots are re-pulled from `persona.LEMON_ADAPTATIONS` each
+    session so persona edits propagate without manual migration of persisted
+    snapshots. current_goals describe lemon's default texting mode (not
+    user-context state), so they belong with the other persona-fixed slots
+    rather than with concerns; persisting LLM-added drift here led to old
+    therapist-flavoured goals leaking through after persona retunes.
     """
     state = load_lemon_state()
     state["state"] = dict(LEMON_SESSION_START_STATE)
-    # Reset persona-fixed adaptation slots; concerns/goals persist.
     state["adaptations"]["relational_stance"] = LEMON_ADAPTATIONS.get("relational_stance")
     state["adaptations"]["values"] = list(LEMON_ADAPTATIONS.get("values") or [])
+    state["adaptations"]["current_goals"] = list(LEMON_ADAPTATIONS.get("current_goals") or [])
     # Re-validate so any string-form values from older snapshots get normalized
     # into the tagged shape consistently with the rest of the schema.
     return validate_lemon_state(state, fallback=DEFAULT_LEMON_STATE)

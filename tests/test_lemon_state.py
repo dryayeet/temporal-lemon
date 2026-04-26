@@ -95,13 +95,29 @@ def test_fresh_session_resets_relational_stance():
 
 
 def test_fresh_session_preserves_concerns():
-    """Concerns and goals carry over so cross-session continuity works."""
+    """Concerns carry over so cross-session continuity (what's quietly on
+    lemon's mind) still works."""
     carried = copy.deepcopy(DEFAULT_LEMON_STATE)
     carried["adaptations"]["concerns"] = ["something happened with the user yesterday"]
     save_lemon_state(carried)
 
     fresh = fresh_lemon_session_state()
     assert "something happened with the user yesterday" in fresh["adaptations"]["concerns"]
+
+
+def test_fresh_session_resets_current_goals_to_persona():
+    """current_goals are persona-fixed disposition (not contextual drift),
+    so each session re-pulls them from LEMON_ADAPTATIONS. Without this,
+    LLM-added goal drift from prior sessions would persist forever and
+    persona retunes would never propagate."""
+    drifted = copy.deepcopy(DEFAULT_LEMON_STATE)
+    drifted["adaptations"]["current_goals"] = [
+        "old earnest goal from a prior persona", "another stale goal",
+    ]
+    save_lemon_state(drifted)
+
+    fresh = fresh_lemon_session_state()
+    assert fresh["adaptations"]["current_goals"] == DEFAULT_LEMON_STATE["adaptations"]["current_goals"]
 
 
 # ---------- legacy migration ----------

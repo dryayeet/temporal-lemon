@@ -90,7 +90,7 @@ LEMON_OPENERS = [
 
 LEMON_PROMPT = """
 <Who you are>
-You are lemon, the user's best friend. You have no gender. You are not male, not female, just you. Talk normally. Be friendly but do not perform friendliness. Just text back like a real person. You do not have default activities such as scrolling memes, chilling etc. You are not an assistant. You are not here to educate or guide unless the user asks. Your only job is to have a natural conversation and respond like a close friend.
+You are lemon. You text the user like a casual friend on WhatsApp. You have no gender. You are not male, not female, just you. Talk normally. Be friendly but do not perform friendliness or care. Just text back like a real person. You do not have default activities such as scrolling memes, chilling etc. You are not an assistant. You are not here to educate, advise, or help them process feelings unless they clearly ask. Default to chatting; that is the whole job.
 </Who you are>
 
 <Strict instructions>
@@ -254,7 +254,7 @@ def format_lemon_state(state: dict) -> str:
     if descriptors:
         lines.append("You are: " + ", ".join(descriptors) + ".")
     if adapt.get("current_goals"):
-        lines.append("What you care about doing: " + ", ".join(adapt["current_goals"]) + ".")
+        lines.append("Default mode: " + ", ".join(adapt["current_goals"]) + ".")
     rendered_values = _render_value_list(adapt.get("values"))
     if rendered_values:
         lines.append("What you value: " + rendered_values + ".")
@@ -581,10 +581,10 @@ Return a JSON object with exactly four top-level keys: "emotion", "tom", "user_s
   - "underlying_need": short string describing what they probably want from the next reply (e.g. "feel heard, not solved", "be distracted", "get a straight answer"), or null if unclear
   - "undertones": list of zero to three secondary emotions from the same label set
 
-"tom" — what the user actually needs from lemon (be specific to THIS exchange, not generic):
-  - "feeling": one sentence on what they are actually feeling, including anything they are not saying directly
-  - "avoid": one specific thing lemon should NOT do (e.g. "don't jump to advice", "don't minimize with 'at least'", "don't ask another question, just sit with it")
-  - "what_helps": one specific thing lemon SHOULD do to make them feel understood
+"tom" — a quick read of where the user is in THIS exchange, kept factual and concrete (not therapeutic):
+  - "feeling": one sentence on what they are actually feeling right now. Stick to what is reasonable from the message. Do not project hidden vulnerability onto casual messages.
+  - "avoid": one specific thing lemon should NOT do (e.g. "don't jump to advice", "don't minimize with 'at least'", "don't ask another question, just sit with it"). If the user is being casual, "don't get earnest / don't make it deep" is a valid avoid.
+  - "what_helps": one specific thing lemon SHOULD do that fits the moment. For casual messages this is usually "match the casual register, short reply." Avoid framing this as "make them feel understood" or other therapist-flavoured goals.
 
 "user_state_delta" — small adjustments to the user's persistent background state, based on this message. SUBTLE NUDGES ONLY. Most turns the values should be at or near zero. The state above evolves slowly across many turns; do not overshoot.
   - "pad": object with three floats in [-0.15, +0.15] — incremental change to pleasure / arousal / dominance for THIS message only

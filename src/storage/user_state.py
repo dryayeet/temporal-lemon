@@ -102,6 +102,11 @@ _PAD_NUDGE_CAP = 0.15      # how far PAD can move per turn
 _TRAIT_NUDGE_CAP = 0.02    # traits are essentially frozen at stage 1
 _LIST_MAX_LEN = 5          # cap on goals/values/concerns
 _STRING_MAX_LEN = 80       # per-entry length cap for adaptations
+# Below this magnitude, an individual trait reads as noise rather than real
+# drift (~2.5 turns at the per-turn cap). Used by the load_user_state
+# migration overlay to detect legacy snapshots from before the calibrated
+# baseline shipped.
+_LEGACY_TRAIT_NOISE = 0.05
 
 
 # ---------- helpers ----------
@@ -382,11 +387,24 @@ def is_cold_start(state: dict) -> bool:
 # ---------- persistence ----------
 
 def load_user_state() -> dict:
-    """Load the latest persisted user_state, falling back to DEFAULT_USER_STATE."""
+    """Load the latest persisted user_state, falling back to DEFAULT_USER_STATE.
+
+    Migration: snapshots saved before the calibrated trait baseline shipped
+    contain effectively-zero traits (either literal zeros or one or two
+    nudges of noise on top — per-turn cap is ±0.02, so a couple of turns
+    of oscillating drift can land within ±0.05). Treat that as "no real
+    signal yet" and overlay the configured baseline so new sessions don't
+    render a flat-zero profile. Once any trait has crossed ±0.05 (≥3 turns
+    of monotonic LLM movement), the check fails and the drifted snapshot
+    survives untouched.
+    """
     saved = latest_user_state()
     if saved is None:
         return copy.deepcopy(DEFAULT_USER_STATE)
-    return validate_user_state(saved, fallback=DEFAULT_USER_STATE)
+    validated = validate_user_state(saved, fallback=DEFAULT_USER_STATE)
+    if all(abs(float(validated["traits"].get(k, 0.0))) <= _LEGACY_TRAIT_NOISE for k in _TRAIT_KEYS):
+        validated["traits"] = copy.deepcopy(DEFAULT_USER_STATE["traits"])
+    return validated
 
 
 def fresh_user_session_state() -> dict:

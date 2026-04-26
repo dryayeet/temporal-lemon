@@ -280,6 +280,51 @@ def test_load_returns_default_when_db_empty():
     assert out is not DEFAULT_USER_STATE   # fresh copy
 
 
+def test_load_reseeds_when_persisted_traits_all_zero():
+    """Legacy snapshots saved before the calibrated baseline shipped have
+    every trait at 0.0. The loader should overlay the configured baseline
+    so new sessions don't render 0.0 across the board."""
+    from storage import db
+    legacy = copy.deepcopy(DEFAULT_USER_STATE)
+    legacy["traits"] = {
+        "openness": 0.0, "conscientiousness": 0.0, "extraversion": 0.0,
+        "agreeableness": 0.0, "neuroticism": 0.0,
+    }
+    db.save_user_state_snapshot(legacy)
+    loaded = load_user_state()
+    assert loaded["traits"] == DEFAULT_USER_STATE["traits"]
+
+
+def test_load_keeps_drifted_traits():
+    """If the persisted snapshot has any trait beyond the legacy-noise band
+    (~3 turns of monotonic LLM movement), the loader must not overwrite —
+    accumulated drift survives."""
+    s = copy.deepcopy(DEFAULT_USER_STATE)
+    s["traits"] = {
+        "openness": 0.0, "conscientiousness": 0.0, "extraversion": 0.0,
+        "agreeableness": 0.0, "neuroticism": -0.10,
+    }
+    save_user_state(s)
+    loaded = load_user_state()
+    assert loaded["traits"]["neuroticism"] == -0.10
+    assert loaded["traits"]["openness"] == 0.0
+
+
+def test_load_reseeds_when_persisted_traits_only_legacy_noise():
+    """Legacy snapshots that picked up a single ±0.02 nudge of noise should
+    still be treated as legacy and re-seeded — only meaningful drift
+    survives."""
+    from storage import db
+    s = copy.deepcopy(DEFAULT_USER_STATE)
+    s["traits"] = {
+        "openness": 0.02, "conscientiousness": -0.01, "extraversion": 0.0,
+        "agreeableness": 0.04, "neuroticism": -0.02,
+    }
+    db.save_user_state_snapshot(s)
+    loaded = load_user_state()
+    assert loaded["traits"] == DEFAULT_USER_STATE["traits"]
+
+
 def test_save_load_roundtrip():
     s = copy.deepcopy(DEFAULT_USER_STATE)
     s["state"]["mood_label"] = "tired"
