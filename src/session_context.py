@@ -42,10 +42,7 @@ def initial_history(internal_state: dict, session_start: datetime) -> list[dict]
     facts_block = format_user_facts(facts)
     if facts_block:
         history.append({"role": "system", "content": facts_block})
-    log.info(
-        "event=initial_history persona_chars=%d facts_count=%d blocks=%d",
-        len(LEMON_PROMPT), len(facts), len(history),
-    )
+    log.info("initial_history facts=%d blocks=%d", len(facts), len(history))
     return history
 
 
@@ -82,10 +79,6 @@ def run_bookkeeping(
     so a bookkeep hiccup never affects the reply that already shipped.
     """
     started = time.time()
-    log.info(
-        "event=bookkeep_thread_start session=%s reply_chars=%d auto_facts=%s",
-        session_id, len(reply), config.ENABLE_AUTO_FACTS,
-    )
     try:
         existing = db.get_facts()
         if config.ENABLE_AUTO_FACTS:
@@ -100,7 +93,6 @@ def run_bookkeeping(
             )
         else:
             new_facts, new_state = {}, state_snapshot
-            log.info("event=bookkeep_thread_skipped reason=auto_facts_disabled")
 
         upserted = 0
         with lock:
@@ -113,11 +105,8 @@ def run_bookkeeping(
             # them (after a short delay — bookkeeping runs post-reply).
             trace.facts_extracted = new_facts
         log.info(
-            "event=bookkeep_thread_done session=%s upserted=%d state_saved=True elapsed_ms=%d",
-            session_id, upserted, int((time.time() - started) * 1000),
+            "bookkeep_done upserted=%d elapsed_ms=%d",
+            upserted, int((time.time() - started) * 1000),
         )
     except Exception as e:
-        log.error(
-            "event=bookkeep_thread_failed session=%s error=%r elapsed_ms=%d",
-            session_id, e, int((time.time() - started) * 1000),
-        )
+        log.error("bookkeep_failed error=%r", e)

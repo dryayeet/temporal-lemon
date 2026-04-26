@@ -6,11 +6,9 @@ standard `logging.Logger` instances under the `lemon.*` namespace.
 
 Levels (env LEMON_LOG_LEVEL, default INFO)
 ------------------------------------------
-INFO  — every API call (model + purpose), every API response (status,
-        timing, parsed shape, token usage when available), every DB
-        write, every pipeline phase, every web request.
-DEBUG — additionally dumps full request/response bodies, full prompts,
-        full message contents.
+INFO  — one line per pipeline phase (with timing), per HTTP request,
+        per DB write, per LLM round-trip outcome.
+DEBUG — additionally dumps full request/response bodies and prompts.
 WARNING — fallbacks (parse failure → defaults, HTTP non-2xx, etc.).
 ERROR — pipeline-breaking errors.
 

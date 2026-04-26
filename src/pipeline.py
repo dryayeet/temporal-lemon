@@ -118,15 +118,12 @@ def run_empathy_turn(
     turn_started = time.time()
 
     log.info(
-        "event=turn_start turn=%s session=%s msg_len=%d msg_preview=%r "
-        "base_history_len=%d pipeline=%s keep_recent=%d",
-        turn_id, session_id, len(user_msg), preview(user_msg, 80),
-        len(base_history), config.ENABLE_EMPATHY_PIPELINE, keep_recent_turns,
+        "turn_start turn=%s session=%s msg=%r pipeline=%s",
+        turn_id, session_id, preview(user_msg, 60), config.ENABLE_EMPATHY_PIPELINE,
     )
 
     # ---------- short-circuit when pipeline disabled ----------
     if not config.ENABLE_EMPATHY_PIPELINE:
-        log.info("event=turn_short_circuit turn=%s reason=pipeline_disabled", turn_id)
         if on_phase:
             on_phase(PHASE_REPLYING)
         history = list(base_history)
@@ -139,10 +136,8 @@ def run_empathy_turn(
             db.log_message(session_id, "assistant", reply)
         trace.final = reply
         log.info(
-            "event=turn_done turn=%s session=%s reply_chars=%d elapsed_ms=%d "
-            "pipeline=False regenerated=False",
-            turn_id, session_id, len(reply),
-            int((time.time() - turn_started) * 1000),
+            "turn_done turn=%s reply_chars=%d elapsed_ms=%d pipeline=off",
+            turn_id, len(reply), int((time.time() - turn_started) * 1000),
         )
         return reply, trace
 
@@ -152,12 +147,11 @@ def run_empathy_turn(
     # ---------- 1. merged read: emotion + theory-of-mind in one call ----------
     if on_phase:
         on_phase(PHASE_READING)
-    log.info("event=phase_start turn=%s phase=%s", turn_id, PHASE_READING)
     phase_started = time.time()
     emotion, tom = read_user(user_msg, recent_msgs=recent, model=model)
     log.info(
-        "event=phase_done turn=%s phase=%s elapsed_ms=%d",
-        turn_id, PHASE_READING, int((time.time() - phase_started) * 1000),
+        "phase=reading elapsed_ms=%d emotion=%s",
+        int((time.time() - phase_started) * 1000), emotion.get("primary"),
     )
     trace.emotion = emotion
     trace.tom = tom
@@ -174,7 +168,6 @@ def run_empathy_turn(
     # ---------- 2. retrieve memories (DB only, no LLM) ----------
     if on_phase:
         on_phase(PHASE_REMEMBERING)
-    log.info("event=phase_start turn=%s phase=%s", turn_id, PHASE_REMEMBERING)
     phase_started = time.time()
     memories = relevant_memories(
         user_msg=user_msg,
@@ -184,9 +177,8 @@ def run_empathy_turn(
         limit=config.MEMORY_RETRIEVAL_LIMIT,
     )
     log.info(
-        "event=phase_done turn=%s phase=%s elapsed_ms=%d retrieved=%d emotion=%s",
-        turn_id, PHASE_REMEMBERING, int((time.time() - phase_started) * 1000),
-        len(memories), emotion.get("primary"),
+        "phase=remembering elapsed_ms=%d retrieved=%d",
+        int((time.time() - phase_started) * 1000), len(memories),
     )
     trace.memories = memories
 
@@ -200,27 +192,22 @@ def run_empathy_turn(
     blocks_injected.append("emotion")
     history = _inject_block(history, TOM_TAG, format_tom_block(tom))
     blocks_injected.append("tom")
-    log.info("event=blocks_injected turn=%s blocks=%s", turn_id, blocks_injected)
 
     history.append({"role": "user", "content": user_msg})
     pre_compress_len = len(history)
     history = compress_history(history, keep_recent=keep_recent_turns)
     if len(history) != pre_compress_len:
         log.info(
-            "event=history_compressed turn=%s pre=%d post=%d folded=%d",
-            turn_id, pre_compress_len, len(history),
-            pre_compress_len - len(history),
+            "history_compressed pre=%d post=%d", pre_compress_len, len(history),
         )
 
     if on_phase:
         on_phase(PHASE_REPLYING)
-    log.info("event=phase_start turn=%s phase=%s", turn_id, PHASE_REPLYING)
     phase_started = time.time()
     draft = generate_reply(history, model=model)
     log.info(
-        "event=phase_done turn=%s phase=%s elapsed_ms=%d draft_chars=%d preview=%r",
-        turn_id, PHASE_REPLYING, int((time.time() - phase_started) * 1000),
-        len(draft), preview(draft, 80),
+        "phase=replying elapsed_ms=%d chars=%d",
+        int((time.time() - phase_started) * 1000), len(draft),
     )
     trace.draft = draft
 
@@ -228,20 +215,14 @@ def run_empathy_turn(
     check = check_response(user_msg, draft, emotion)
     trace.check = check
     log.info(
-        "event=empathy_check turn=%s passed=%s failures=%d critique_chars=%d",
-        turn_id, check.passed,
-        len(getattr(check, "failures", []) or []),
-        len(getattr(check, "critique", "") or ""),
+        "empathy_check passed=%s failures=%d",
+        check.passed, len(getattr(check, "failures", []) or []),
     )
 
     final = draft
     if not check.passed and config.EMPATHY_RETRY_ON_FAIL:
         if on_phase:
             on_phase(PHASE_REVISING)
-        log.info(
-            "event=phase_start turn=%s phase=%s reason=empathy_check_failed",
-            turn_id, PHASE_REVISING,
-        )
         phase_started = time.time()
         retry_history = _inject_block(history, CRITIQUE_TAG, format_critique_block(draft, check.critique))
         try:
@@ -250,28 +231,21 @@ def run_empathy_turn(
                 final = second
                 trace.regenerated = True
                 log.info(
-                    "event=regenerated turn=%s old_chars=%d new_chars=%d "
-                    "elapsed_ms=%d preview=%r",
-                    turn_id, len(draft), len(final),
-                    int((time.time() - phase_started) * 1000),
-                    preview(final, 80),
+                    "regenerated elapsed_ms=%d chars=%d",
+                    int((time.time() - phase_started) * 1000), len(final),
                 )
             else:
-                log.warning(
-                    "event=regenerate_empty turn=%s — keeping original draft",
-                    turn_id,
-                )
+                log.warning("regenerate_empty turn=%s — kept draft", turn_id)
         except Exception as e:
-            log.error("event=regenerate_failed turn=%s error=%r", turn_id, e)
+            log.error("regenerate_failed turn=%s error=%r", turn_id, e)
 
     if session_id is not None:
         db.log_message(session_id, "assistant", final)
     trace.final = final
 
     log.info(
-        "event=turn_done turn=%s session=%s final_chars=%d regenerated=%s "
-        "elapsed_ms=%d pipeline=True",
-        turn_id, session_id, len(final), trace.regenerated,
+        "turn_done turn=%s chars=%d regenerated=%s elapsed_ms=%d",
+        turn_id, len(final), trace.regenerated,
         int((time.time() - turn_started) * 1000),
     )
 

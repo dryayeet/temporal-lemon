@@ -196,10 +196,7 @@ def relevant_memories(
         )
 
     if not candidates:
-        log.info(
-            "event=memory_retrieval_empty user_msg=%r emotion=%s reason=no_candidates",
-            preview(user_msg, 60), emotion,
-        )
+        log.info("memory_empty emotion=%s", emotion)
         return []
 
     # 2. Normalize BM25 scores within the pool. Fallback path has no BM25 →
@@ -233,15 +230,12 @@ def relevant_memories(
     top = scored[:limit]
 
     log.info(
-        "event=memory_retrieved user_msg=%r emotion=%s candidates=%d returned=%d "
-        "fallback=%s top_scores=%s",
-        preview(user_msg, 60), emotion, len(candidates), len(top),
-        used_fallback, [round(r["score"], 3) for r in top],
+        "memory candidates=%d returned=%d fallback=%s",
+        len(candidates), len(top), used_fallback,
     )
     for r in top:
         log.debug(
-            "event=memory_pick id=%s emotion=%s breakdown=%s preview=%r",
-            r.get("id"), r.get("emotion"), r["breakdown"],
-            preview(r.get("content", ""), 60),
+            "memory_pick id=%s emotion=%s preview=%r",
+            r.get("id"), r.get("emotion"), preview(r.get("content", ""), 60),
         )
     return top

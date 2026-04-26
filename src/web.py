@@ -80,24 +80,19 @@ app = FastAPI(
 async def log_requests(request: Request, call_next: Any) -> Any:
     rid = uuid.uuid4().hex[:8]
     started = time.time()
-    log.info(
-        "event=http_request id=%s method=%s path=%s client=%s",
-        rid, request.method, request.url.path,
-        request.client.host if request.client else "?",
-    )
     try:
         response = await call_next(request)
     except Exception as e:
         elapsed_ms = int((time.time() - started) * 1000)
         log.error(
-            "event=http_unhandled id=%s path=%s error=%r elapsed_ms=%d",
-            rid, request.url.path, e, elapsed_ms,
+            "http_unhandled %s %s error=%r elapsed_ms=%d",
+            request.method, request.url.path, e, elapsed_ms,
         )
         raise
     elapsed_ms = int((time.time() - started) * 1000)
     log.info(
-        "event=http_response id=%s status=%d elapsed_ms=%d",
-        rid, response.status_code, elapsed_ms,
+        "http %s %s -> %d %dms",
+        request.method, request.url.path, response.status_code, elapsed_ms,
     )
     response.headers["X-Request-ID"] = rid
     return response
@@ -124,11 +119,8 @@ _first = random.choice(LEMON_OPENERS)
 _ctx.history.append({"role": "assistant", "content": _first})
 db.log_message(_session_id, "assistant", _first)
 log.info(
-    "event=server_startup session=%s opener=%r chat_model=%s state_model=%s "
-    "empathy=%s auto_facts=%s prompt_cache=%s",
-    _session_id, preview(_first, 60), config.CHAT_MODEL, config.STATE_MODEL,
-    config.ENABLE_EMPATHY_PIPELINE, config.ENABLE_AUTO_FACTS,
-    config.ENABLE_PROMPT_CACHE,
+    "server_startup session=%s chat_model=%s state_model=%s",
+    _session_id, config.CHAT_MODEL, config.STATE_MODEL,
 )
 
 # The HTML template is static; read it once at import instead of on every GET.
@@ -284,7 +276,7 @@ def _stream_reply(user_msg: str) -> Iterator[bytes]:
             last_phase = phase
 
     except (requests.RequestException, RuntimeError) as e:
-        log.error("event=chat_stream_error error=%r", e)
+        log.error("chat_stream_error error=%r", e)
         yield _sse("error", str(e))
         return
 
@@ -332,10 +324,7 @@ def command(req: CommandRequest) -> JSONResponse:
         raise HTTPException(400, "not a slash command")
     with _lock:
         result = dispatch(text, _ctx)
-    log.info(
-        "event=command_dispatched cmd=%r exit=%s output_chars=%d",
-        preview(text, 40), _ctx.exit_requested, len(result.output),
-    )
+    log.info("command cmd=%r exit=%s", preview(text, 40), _ctx.exit_requested)
     return JSONResponse({"output": result.output, "exit": _ctx.exit_requested})
 
 
@@ -458,7 +447,7 @@ def health() -> HealthResponse:
     except Exception as e:
         db_ok = False
         db_error = repr(e)
-        log.warning("event=health_db_check_failed error=%s", db_error)
+        log.warning("health_db_failed error=%s", db_error)
 
     return HealthResponse(
         status="ok" if db_ok else "degraded",

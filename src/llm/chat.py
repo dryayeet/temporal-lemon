@@ -7,7 +7,7 @@ import requests
 
 import config
 from config import OPENROUTER_HEADERS, OPENROUTER_URL
-from logging_setup import get_logger, preview
+from logging_setup import get_logger
 from prompts import PERSONA_TAG  # marks the persona system block as cacheable
 
 log = get_logger("llm.chat")
@@ -77,13 +77,10 @@ def iter_chat(history: list[dict], model: Optional[str] = None) -> Iterator[str]
     }
 
     log.info(
-        "event=chat_request model=%s %s temp=%.2f top_p=%.2f freq_pen=%.2f "
-        "max_tokens=%d cache=%s stream=True",
+        "chat_request model=%s %s",
         payload["model"], _summarize_history(wire_messages),
-        payload["temperature"], payload["top_p"], payload["frequency_penalty"],
-        payload["max_tokens"], config.ENABLE_PROMPT_CACHE,
     )
-    log.debug("event=chat_request_body payload=%s", json.dumps(payload)[:4000])
+    log.debug("chat_request_body payload=%s", json.dumps(payload)[:4000])
 
     started = time.time()
     with requests.post(
@@ -96,12 +93,10 @@ def iter_chat(history: list[dict], model: Optional[str] = None) -> Iterator[str]
         if response.status_code >= 400:
             body = response.text[:500]
             log.error(
-                "event=chat_http_error status=%d elapsed_ms=%d body=%s",
+                "chat_http_error status=%d elapsed_ms=%d body=%s",
                 response.status_code, int((time.time() - started) * 1000), body,
             )
             raise RuntimeError(f"HTTP {response.status_code}: {body}")
-
-        log.info("event=chat_response_open status=%d", response.status_code)
         # OpenRouter sends `text/event-stream` with no charset; requests defaults
         # to ISO-8859-1 in that case, which mojibake's any non-ASCII (emoji,
         # accented chars, devanagari) into Latin-1 byte-per-char garbage.
@@ -116,10 +111,10 @@ def iter_chat(history: list[dict], model: Optional[str] = None) -> Iterator[str]
             elapsed_ms = int((time.time() - started) * 1000)
             full = "".join(chunks)
             log.info(
-                "event=chat_response_done chars=%d chunks=%d elapsed_ms=%d preview=%r",
-                len(full), len(chunks), elapsed_ms, preview(full, 80),
+                "chat_response chars=%d elapsed_ms=%d",
+                len(full), elapsed_ms,
             )
-            log.debug("event=chat_response_full content=%s", full)
+            log.debug("chat_response_full content=%s", full)
 
 
 def generate_reply(history: list[dict], model: Optional[str] = None) -> str:

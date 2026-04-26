@@ -21,11 +21,8 @@ def main() -> None:
     setup_logging()
     log = get_logger("lem")
     log.info(
-        "event=cli_startup chat_model=%s state_model=%s empathy=%s "
-        "auto_facts=%s prompt_cache=%s db_path=%s",
+        "cli_startup chat_model=%s state_model=%s",
         config.CHAT_MODEL, config.STATE_MODEL,
-        config.ENABLE_EMPATHY_PIPELINE, config.ENABLE_AUTO_FACTS,
-        config.ENABLE_PROMPT_CACHE, config.DB_PATH,
     )
 
     session_start = datetime.now()

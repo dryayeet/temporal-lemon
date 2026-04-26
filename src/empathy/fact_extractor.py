@@ -140,10 +140,7 @@ def _validate(
 
         canonical = _reconcile_key(key, existing_iter)
         if canonical and canonical != key:
-            log.info(
-                "event=fact_reconciled proposed=%s canonical=%s",
-                key, canonical,
-            )
+            log.info("fact_reconciled %s -> %s", key, canonical)
             key = canonical
 
         out[key] = value

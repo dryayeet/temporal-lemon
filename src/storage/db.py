@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 import config
-from logging_setup import get_logger, preview
+from logging_setup import get_logger
 
 log = get_logger("storage.db")
 
@@ -141,10 +141,7 @@ def _rebuild_fts_if_needed(conn: sqlite3.Connection) -> None:
     if fts_count >= msg_count:
         return
     conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
-    log.info(
-        "event=db_fts_rebuilt msg_count=%d fts_count_before=%d",
-        msg_count, fts_count,
-    )
+    log.info("db_fts_rebuilt msgs=%d", msg_count)
 
 
 @contextmanager
@@ -176,7 +173,7 @@ def start_session(path: Optional[Path] = None) -> int:
             "INSERT INTO sessions (started_at) VALUES (?)", (_now(),)
         )
         sid = cur.lastrowid
-        log.info("event=db_session_start session=%s", sid)
+        log.info("session_start id=%s", sid)
         return sid
 
 
@@ -186,7 +183,7 @@ def end_session(session_id: int, path: Optional[Path] = None) -> None:
             "UPDATE sessions SET ended_at = ? WHERE id = ?",
             (_now(), session_id),
         )
-        log.info("event=db_session_end session=%s", session_id)
+        log.info("session_end id=%s", session_id)
 
 
 def list_sessions(limit: int = 20, path: Optional[Path] = None) -> list[dict]:
@@ -221,10 +218,8 @@ def log_message(
         )
         mid = cur.lastrowid
         log.info(
-            "event=db_message_insert session=%s msg=%s role=%s chars=%d "
-            "emotion=%s intensity=%s preview=%r",
-            session_id, mid, role, len(content), emotion, intensity,
-            preview(content, 60),
+            "msg_insert id=%s role=%s chars=%d emotion=%s",
+            mid, role, len(content), emotion,
         )
         return mid
 
@@ -250,9 +245,7 @@ def find_messages_by_emotion(
     with connect(path) as c:
         rows = c.execute(sql, params).fetchall()
         log.debug(
-            "event=db_messages_lookup emotion=%s exclude_session=%s limit=%d "
-            "returned=%d",
-            emotion, exclude_session_id, limit, len(rows),
+            "msg_by_emotion emotion=%s returned=%d", emotion, len(rows),
         )
         return [dict(r) for r in rows]
 
@@ -295,12 +288,9 @@ def find_messages_by_fts(
             rows = c.execute(sql, params).fetchall()
         except sqlite3.OperationalError as e:
             # Malformed FTS query (e.g. all stopwords got stripped to "").
-            log.warning("event=db_fts_query_invalid query=%r error=%r", fts_query, e)
+            log.warning("fts_invalid query=%r error=%r", fts_query, e)
             return []
-    log.debug(
-        "event=db_fts_lookup query=%r exclude_session=%s pool=%d returned=%d",
-        fts_query, exclude_session_id, candidate_pool, len(rows),
-    )
+    log.debug("fts query=%r returned=%d", fts_query, len(rows))
     return [dict(r) for r in rows]
 
 
@@ -328,10 +318,7 @@ def find_recent_user_messages(
 
     with connect(path) as c:
         rows = c.execute(sql, params).fetchall()
-    log.debug(
-        "event=db_recent_users exclude_session=%s limit=%d returned=%d",
-        exclude_session_id, limit, len(rows),
-    )
+    log.debug("recent_users returned=%d", len(rows))
     return [dict(r) for r in rows]
 
 
@@ -354,9 +341,8 @@ def save_state_snapshot(state: dict, session_id: Optional[int] = None,
             (session_id, _now(), json.dumps(state)),
         )
         log.info(
-            "event=db_state_save session=%s mood=%s energy=%s engagement=%s disposition=%s",
-            session_id, state.get("mood"), state.get("energy"),
-            state.get("engagement"), state.get("disposition"),
+            "state_save mood=%s disposition=%s",
+            state.get("mood"), state.get("disposition"),
         )
 
 
@@ -377,10 +363,7 @@ def upsert_fact(key: str, value: str, source_session_id: Optional[int] = None,
             """,
             (key, value, source_session_id, now, now),
         )
-        log.info(
-            "event=db_fact_upsert key=%s value=%r source_session=%s",
-            key, preview(value, 80), source_session_id,
-        )
+        log.info("fact_upsert key=%s", key)
 
 
 def get_facts(path: Optional[Path] = None) -> dict[str, str]:
@@ -393,5 +376,5 @@ def delete_fact(key: str, path: Optional[Path] = None) -> bool:
     with connect(path) as c:
         cur = c.execute("DELETE FROM facts WHERE key = ?", (key,))
         deleted = cur.rowcount > 0
-        log.info("event=db_fact_delete key=%s deleted=%s", key, deleted)
+        log.info("fact_delete key=%s deleted=%s", key, deleted)
         return deleted
