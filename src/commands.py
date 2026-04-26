@@ -212,6 +212,128 @@ def _why(ctx: ChatContext, args: str) -> CommandResult:
     return CommandResult("\n".join(lines))
 
 
+@command("search", "search past messages: /search <query>")
+def _search(ctx: ChatContext, args: str) -> CommandResult:
+    q = args.strip()
+    if not q:
+        return CommandResult("usage: /search <query>")
+    rows = db.find_messages_by_fts(fts_query=q, candidate_pool=10)
+    if not rows:
+        return CommandResult(f"(no matches for '{q}')")
+    lines = [f"matches for '{q}':"]
+    for r in rows[:8]:
+        when = (r.get("created_at") or "")[:16]
+        snippet = (r.get("content") or "").replace("\n", " ")
+        if len(snippet) > 100:
+            snippet = snippet[:97] + "..."
+        lines.append(f"  #{r['session_id']:<3} {when}  {snippet}")
+    return CommandResult("\n".join(lines))
+
+
+@command("recall", "show past messages tagged with an emotion: /recall <emotion>")
+def _recall(ctx: ChatContext, args: str) -> CommandResult:
+    emotion = args.strip().lower()
+    if not emotion:
+        return CommandResult("usage: /recall <emotion> (e.g. joy, sadness, anxiety)")
+    rows = db.find_messages_by_emotion(emotion, exclude_session_id=ctx.session_id, limit=8)
+    if not rows:
+        return CommandResult(f"(no past messages tagged '{emotion}')")
+    lines = [f"past messages tagged '{emotion}':"]
+    for r in rows:
+        when = (r.get("created_at") or "")[:16]
+        intensity = r.get("intensity")
+        intensity_str = f" ({intensity:.2f})" if intensity is not None else ""
+        snippet = (r.get("content") or "").replace("\n", " ")
+        if len(snippet) > 100:
+            snippet = snippet[:97] + "..."
+        lines.append(f"  {when}{intensity_str}  {snippet}")
+    return CommandResult("\n".join(lines))
+
+
+@command("stats", "show counts: messages, facts, sessions")
+def _stats(ctx: ChatContext, args: str) -> CommandResult:
+    with db.connect() as c:
+        total_msgs = c.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        total_facts = c.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+        total_sessions = c.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        this_session_msgs = c.execute(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?", (ctx.session_id,)
+        ).fetchone()[0]
+    return CommandResult(
+        "stats:\n"
+        f"  this session: {this_session_msgs} messages\n"
+        f"  all sessions: {total_sessions}\n"
+        f"  all messages: {total_msgs}\n"
+        f"  facts stored: {total_facts}"
+    )
+
+
+@command("config", "show the current behaviour flags")
+def _config(ctx: ChatContext, args: str) -> CommandResult:
+    return CommandResult(
+        "config:\n"
+        f"  chat model:        {ctx.chat_model}\n"
+        f"  state model:       {config.STATE_MODEL}\n"
+        f"  empathy pipeline:  {'on' if config.ENABLE_EMPATHY_PIPELINE else 'off'}\n"
+        f"  empathy retry:     {'on' if config.EMPATHY_RETRY_ON_FAIL else 'off'}\n"
+        f"  auto facts:        {'on' if config.ENABLE_AUTO_FACTS else 'off'} (max {config.AUTO_FACTS_MAX_PER_TURN}/turn)\n"
+        f"  prompt cache:      {'on' if config.ENABLE_PROMPT_CACHE else 'off'}\n"
+        f"  memory retrieval:  top {config.MEMORY_RETRIEVAL_LIMIT}\n"
+        f"  keep recent turns: {config.KEEP_RECENT_TURNS}"
+    )
+
+
+@command("clear", "drop visible chat history this session (db is untouched)")
+def _clear(ctx: ChatContext, args: str) -> CommandResult:
+    before = len(ctx.history)
+    ctx.history = [m for m in ctx.history if m["role"] == "system"]
+    dropped = before - len(ctx.history)
+    return CommandResult(f"cleared {dropped} message(s). past sessions in db are untouched.")
+
+
+@command("export", "export this session's chat as plain text")
+def _export(ctx: ChatContext, args: str) -> CommandResult:
+    convo = [m for m in ctx.history if m["role"] != "system"]
+    if not convo:
+        return CommandResult("(nothing to export yet)")
+    lines = [f"# session #{ctx.session_id}", ""]
+    for m in convo:
+        speaker = "you" if m["role"] == "user" else "lemon"
+        lines.append(f"{speaker}: {m['content']}")
+        lines.append("")
+    return CommandResult("\n".join(lines).rstrip())
+
+
+@command("autofacts", "toggle automatic fact extraction: /autofacts on|off")
+def _autofacts(ctx: ChatContext, args: str) -> CommandResult:
+    arg = args.strip().lower()
+    if arg in ("on", "enable", "true", "1"):
+        config.ENABLE_AUTO_FACTS = True
+        return CommandResult("auto facts: ON")
+    if arg in ("off", "disable", "false", "0"):
+        config.ENABLE_AUTO_FACTS = False
+        return CommandResult("auto facts: OFF")
+    if not arg:
+        status = "ON" if config.ENABLE_AUTO_FACTS else "OFF"
+        return CommandResult(f"auto facts: {status}")
+    return CommandResult("usage: /autofacts on|off")
+
+
+@command("cache", "toggle prompt caching: /cache on|off")
+def _cache(ctx: ChatContext, args: str) -> CommandResult:
+    arg = args.strip().lower()
+    if arg in ("on", "enable", "true", "1"):
+        config.ENABLE_PROMPT_CACHE = True
+        return CommandResult("prompt cache: ON")
+    if arg in ("off", "disable", "false", "0"):
+        config.ENABLE_PROMPT_CACHE = False
+        return CommandResult("prompt cache: OFF")
+    if not arg:
+        status = "ON" if config.ENABLE_PROMPT_CACHE else "OFF"
+        return CommandResult(f"prompt cache: {status}")
+    return CommandResult("usage: /cache on|off")
+
+
 @command("quit", "exit the chat (alias: /exit)")
 @command("exit", "exit the chat (alias: /quit)")
 def _quit(ctx: ChatContext, args: str) -> CommandResult:

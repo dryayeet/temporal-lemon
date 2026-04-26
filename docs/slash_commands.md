@@ -12,9 +12,17 @@ Type any of these in the CLI or web input. Anything starting with `/` is dispatc
 | `/forget key`                 | delete a fact                                                         |
 | `/history [n]`                | show the last N exchanges in this session (default 5)                 |
 | `/rewind`                     | drop the last exchange (your message + lemon's reply)                 |
+| `/clear`                      | drop the in-memory chat history this session (database is untouched)  |
+| `/export`                     | dump this session's chat as plain text                                |
 | `/model name`                 | switch chat model for this session (e.g. `anthropic/claude-haiku-4.5`)|
 | `/sessions`                   | list recent sessions stored in the database                           |
+| `/search query`               | full-text search past messages (FTS5 over `messages.content`)         |
+| `/recall emotion`             | past user messages tagged with the given emotion                      |
+| `/stats`                      | counts: messages this session, sessions, total messages, facts        |
+| `/config`                     | show current behaviour flags (model, empathy, auto-facts, cache, …)   |
 | `/empathy on\|off`            | toggle the empathy pipeline (no arg shows current status)             |
+| `/autofacts on\|off`          | toggle automatic fact extraction (no arg shows current status)        |
+| `/cache on\|off`              | toggle Anthropic-style prompt caching (no arg shows current status)   |
 | `/why`                        | show the empathy-pipeline trace for the last reply                    |
 | `/quit` or `/exit`            | end the chat                                                          |
 
@@ -77,6 +85,55 @@ you: /empathy off
 empathy pipeline: OFF
 ```
 Drops to one user-facing chat call per turn (skips `user_read`, memory retrieval, and the post-check). The backgrounded bookkeeping call still runs after each reply so facts/state keep accumulating.
+
+`/autofacts off` and `/cache off` are the matching toggles for fact extraction and prompt caching, with the same semantics — runtime-only, reverts on next process start.
+
+**Search past messages by content:**
+```
+you: /search exam
+matches for 'exam':
+  #61  2026-04-26T19:33  worried about my exam tuesday
+  #58  2026-04-23T14:02  exam went better than i thought
+  …
+```
+Hits go through the FTS5 index with the porter stemmer, so `exam` matches `exams` / `examined`.
+
+**Pull up past messages by emotion:**
+```
+you: /recall sadness
+past messages tagged 'sadness':
+  2026-04-21T22:14 (0.78)  i didn't think it would hit me this hard
+  …
+```
+Reads from the `emotion` column the empathy pipeline writes per user turn. `intensity` shown in parentheses.
+
+**Quick situational view:**
+```
+you: /stats
+stats:
+  this session: 12 messages
+  all sessions: 64
+  all messages: 478
+  facts stored: 175
+
+you: /config
+config:
+  chat model:        anthropic/claude-haiku-4.5
+  state model:       anthropic/claude-haiku-4.5
+  empathy pipeline:  on
+  empathy retry:     on
+  auto facts:        on (max 3/turn)
+  prompt cache:      on
+  memory retrieval:  top 3
+  keep recent turns: 8
+```
+
+**Wipe the visible thread without touching memory:**
+```
+you: /clear
+cleared 14 message(s). past sessions in db are untouched.
+```
+Useful when the in-context history is getting long and you want a fresh visual conversation, but you still want lemon's facts and past sessions intact for retrieval.
 
 ## Adding your own command
 
