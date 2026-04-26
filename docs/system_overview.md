@@ -1,389 +1,355 @@
-# Lemon — System Overview
+# Lemon, end to end
 
-A single-user chat companion designed to simulate a friend, not an assistant.
-Built around a per-turn empathy pipeline that reads the user, retrieves
-relevant past moments, drafts a reply, runs a sentiment-mirror check, and
-extracts durable facts in the background. Both lemon and the user are
-modelled with the same three-layer internal state (Big 5 traits +
-characteristic adaptations + PAD core affect). Runs as either a CLI REPL
-or a FastAPI web app, persisting everything to one local SQLite file.
+Lemon is a chatbot that tries to feel like a friend instead of an assistant.
+It runs as either a CLI or a small web app, persists everything to a single
+SQLite file on your machine, and talks to one external service: an LLM
+through OpenRouter. That's the whole stack.
 
-This doc is the "whole system at a glance" view. For deeper drill-downs see
-[`TECHNICAL.md`](TECHNICAL.md), [`dyadic_state.md`](dyadic_state.md),
-[`memory_architecture.md`](memory_architecture.md), and
-[`empathy_research.md`](empathy_research.md).
+If you're new here, read this top to bottom. For deeper drill-downs the
+links live at the bottom.
 
 ---
 
-## 1. The project's goal
+## 1. The idea
 
-Most chatbots present as helpful assistants. Lemon's premise is different:
-**simulate a real friend**. That means:
+Most chatbots are shaped like "user asks, bot answers." Lemon is shaped
+differently:
 
-- Two interacting agents, **both** with persistent internal state — not
-  user-as-input + bot-as-output.
-- Reply generation is downstream of state. What lemon "feels" in response
-  to your message shapes how she replies, not the other way around.
-- Memory persists across sessions: facts, mood trajectories, things
-  quietly carried in.
-- The tone is texting-with-a-friend, not therapy-session-transcript. No
-  unsolicited advice, no clinical labelling, no validation cascade.
+- **Two people are in the room.** Lemon has her own state. You have your
+  own state. Both are tracked and both update every turn.
+- **State first, reply second.** What lemon "feels" about your message
+  shapes the reply, not the other way around.
+- **Memory persists.** Facts, mood drift, and things you mentioned last
+  Tuesday all survive across sessions.
+- **Texting register, not therapy register.** No unsolicited advice, no
+  clinical labels, no "I hear you, that's so valid" stacking.
 
-Everything else in the system is in service of that goal.
+Everything else exists in service of those four points.
 
 ---
 
-## 2. High-level architecture
+## 2. The shape of the system
 
 ```
                 ┌──────────────────────────────────────────────┐
-                │  User input (chat msg or /slash command)    │
+                │   You (chat msg, or /slash command)          │
                 └──────────────┬───────────────────────────────┘
                                │
                 ┌──────────────▼───────────────┐
-                │  app/  — entry + orchestrate │
-                │   lem.py / web.py            │
-                │   pipeline.py                │
-                │   session_context.py         │
-                │   commands.py                │
+                │  app/                        │
+                │   lem.py     (CLI)           │
+                │   web.py     (FastAPI + SSE) │
+                │   pipeline.py (orchestrator) │
+                │   session_context, commands  │
                 └──────────────┬───────────────┘
                                │
    ┌─────────────┬─────────────┼─────────────┬──────────────┐
    ▼             ▼             ▼             ▼              ▼
-┌────────┐  ┌─────────┐  ┌──────────┐  ┌──────────┐  ┌────────────┐
-│prompts/│  │empathy/ │  │   llm/   │  │ storage/ │  │ temporal/  │
-│        │  │         │  │          │  │          │  │            │
-│ blocks │  │ user_   │  │ chat.py  │  │  db.py   │  │ age,clock  │
-│ persona│  │  read   │  │ (Open-   │  │ +memory  │  │            │
-│ schwartz│ │ post_   │  │ Router,  │  │ +states  │  │            │
-│ stack  │  │  exch   │  │ requests)│  │ (SQLite) │  │            │
-│        │  │ check   │  │          │  │          │  │            │
-└────────┘  └─────────┘  └──────────┘  └──────────┘  └────────────┘
+ prompts/      empathy/        llm/        storage/       temporal/
+ (every      (read user,    (OpenRouter   (SQLite +      (time of day,
+  prompt +    critique,      via          state +         age decay)
+  formatter,  extract        requests)    memory)
+  Schwartz)   facts)
                                             │
                                             ▼
                             ┌────────────────────────────────┐
-                            │ .lemon.db  (single SQLite file)│
-                            │  6 tables + 1 FTS5 virtual     │
+                            │ .lemon.db   (single SQLite file)│
+                            │  6 tables + 1 FTS5 virtual      │
                             └────────────────────────────────┘
 
   ┌────────────────────────────────────────────────────────────┐
-  │  core/  — config (env, models, knobs) + logging_setup      │
-  │           imported by every module above                   │
+  │  core/   config (env, knobs)  +  logging_setup             │
+  │          imported by everyone                              │
   └────────────────────────────────────────────────────────────┘
 ```
 
-Every Python file lives in a folder. Reads top-down: user input enters
-through `app/`, which orchestrates calls into `prompts/`, `empathy/`, `llm/`,
-`storage/`, and `temporal/`. State and memory both round-trip through
-SQLite. `core/` is cross-cutting infrastructure imported by everyone.
+Every Python file lives inside one of those folders. `app/` is the front
+door, the rest are workers it calls into.
 
 ---
 
-## 3. Per-turn flow
-
-Showing what happens when you type a message and hit send.
+## 3. What happens when you send a message
 
 ```mermaid
 flowchart TD
-    A[User sends message] --> B{slash command?}
-    B -- "/cmd" --> C[commands.dispatch]
-    C --> CR[render system bubble]
-    CR --> END[Done]
+    A[You hit send] --> B{slash command?}
+    B -- "/cmd" --> C[commands.dispatch] --> END[done]
 
-    B -- "regular text" --> D[refresh_base_blocks<br/>time + lemon_state + facts]
+    B -- "regular text" --> D[refresh time + lemon_state + facts blocks]
     D --> E[user_read.read_user<br/>1 LLM call]
 
-    E -. emits 4 sub-objects .-> E1[emotion]
-    E -. .-> E2[theory_of_mind]
-    E -. .-> E3[user_state_delta]
-    E -. .-> E4[lemon_state_delta]
+    E -. emits .-> E1[your emotion]
+    E -. .-> E2[theory of mind on you]
+    E -. .-> E3[your state delta]
+    E -. .-> E4[lemon's state delta]
 
-    E --> F[apply both deltas<br/>→ persist user_state<br/>→ persist lemon_state]
-    F --> G[memory.relevant_memories<br/>FTS5 + composite score, no LLM]
-    G --> H[Inject system blocks:<br/>lemon_state user_state reading memory]
-    H --> I[llm.generate_reply<br/>1 LLM call → buffered draft]
-    I --> J[empathy_check.check_response<br/>12 regex detectors, no LLM]
-    J -- pass --> K[Ship reply]
-    J -- fail --> L[regenerate-once<br/>with critique<br/>1 LLM call]
+    E --> F[apply both deltas, persist both states]
+    F --> G[memory.relevant_memories<br/>FTS5 + scoring, no LLM]
+    G --> H[inject system blocks<br/>lemon_state, user_state, reading, memory]
+    H --> I[generate the reply<br/>1 LLM call, buffered]
+    I --> J[empathy_check<br/>12 regex detectors, no LLM]
+    J -- pass --> K[ship reply]
+    J -- fail --> L[regenerate once<br/>with critique<br/>1 LLM call]
     L --> K
-    K --> M[Background: post_exchange.bookkeep<br/>1 LLM call → facts only]
+    K --> M[background: bookkeep<br/>1 LLM call → save facts]
     M --> END
 ```
 
-**LLM cost per turn:** 2 user-blocking calls (`user_read` + `generate_reply`)
-plus 1 backgrounded (`bookkeep`). Add 1 more if the empathy check fails.
-With `/empathy off`: just `generate_reply` blocks the user.
+**Two things wait on the user:** the read pass and the reply itself.
+The fact-extraction call fires after you've already seen the reply, in a
+background thread. That's three LLM calls per turn (four if the empathy
+check fails and a regenerate happens). All are Haiku 4.5 by default.
 
-**State-first ordering:** both agents' tonic states are nudged *before* the
-reply, in the merged `user_read` pass. The reply call reads `<lemon_state>`
-already containing the post-nudge state, so reply tone reflects what lemon
-"feels" in response to what was just said.
+The non-obvious bit is **state-first ordering**. Both states get updated
+during the read pass. Then the reply is generated against those
+just-updated states. So when lemon replies, her tone reflects what she
+read, not what she carried in.
 
 ---
 
-## 4. Modules
+## 4. The folders, briefly
 
-### `app/` — entry + orchestration
+### `app/`
 
-The five files that drive a turn end-to-end.
+Where a turn actually runs.
 
-| file | purpose |
-|---|---|
-| `lem.py` | CLI REPL entry point. Run as `python -m app.lem`. Reads stdin, dispatches `/commands` or runs the pipeline, prints replies. |
-| `web.py` | FastAPI app + Server-Sent Events streaming. Run as `python -m app.web` or `uvicorn app.web:app --app-dir src`. Single-user, single-process, localhost-only. |
-| `pipeline.py` | The orchestrator: `run_empathy_turn()`. The graph's biggest cross-community bridge (39 edges to 10 different module clusters). Owns the `PipelineTrace` dataclass that flows through `/why`. |
-| `session_context.py` | Shared CLI+web helpers — `initial_history`, `refresh_base_blocks` (rebuilds `<time_context>`, `<lemon_state>`, `<user_facts>` between turns), and `run_bookkeeping` (the daemon-thread fact extractor that fires after the reply ships). |
-| `commands.py` | Slash-command registry + `ChatContext` dataclass. ~22 commands (`/help`, `/state`, `/user_state`, `/why`, `/search`, etc.) registered via a `@command(name, help)` decorator. Same dispatcher serves both the CLI and the web `/command` HTTP endpoint. |
+- **`pipeline.py`** owns `run_empathy_turn()`, the thing that wires every
+  step together. The graph calls it the biggest cross-community bridge,
+  which is just a fancy way of saying it touches almost everything.
+- **`lem.py`** and **`web.py`** are the two entry points. CLI is a stdin
+  loop; web is FastAPI plus Server-Sent Events.
+- **`session_context.py`** has helpers both entry points share:
+  building the initial system-prompt stack, refreshing per-turn blocks,
+  running the post-reply bookkeeping thread.
+- **`commands.py`** is the slash-command registry. ~22 commands, same
+  dispatcher for CLI and web.
 
-### `core/` — cross-cutting infrastructure
+### `core/`
 
-| file | purpose |
-|---|---|
-| `config.py` | All env-tunable knobs in one place: model IDs, prompt-cache toggle, empathy-pipeline toggle, memory-scoring weights, DB path, OpenRouter HTTP headers. Loads `.env` via `python-dotenv` at import time. |
-| `logging_setup.py` | The `lemon.*` logger tree. Two payload-safe formatters: `preview()` for one-line message snippets and `shape_of()` for structure-without-content. Default level INFO; flip to DEBUG via `LEMON_LOG_LEVEL=DEBUG`. |
+Two files, both imported everywhere.
 
-### `prompts/` — every prompt + every system-block formatter
+- **`config.py`** has every env-tunable knob (model IDs, toggles, memory
+  weights, DB path). Loads `.env` at startup.
+- **`logging_setup.py`** sets up a `lemon.*` logger tree with two
+  payload-safe formatters: `preview()` for one-liners, `shape_of()`
+  for "what's the structure" without leaking content.
 
-| file | purpose |
-|---|---|
-| `__init__.py` | The canonical big module (~900 lines, formerly `prompts.py`). Defines `LEMON_PROMPT` (the persona system block), `EMOTION_LABELS` (23-label vocabulary), every `*_TAG` constant, every `format_*_block()` function, and the two LLM-prompt builders `build_user_read_prompt` and `build_bookkeep_prompt`. |
-| `persona.py` | `LEMON_TRAITS` (Big 5 calibrated against `LEMON_PROMPT`) and `LEMON_ADAPTATIONS` (goals, Schwartz-tagged values, concerns, relational stance) — the static seeds of lemon's three-layer state. |
-| `prompt_stack.py` | `replace_system_block()` (drop-and-reinsert by tag) and `compress_history()` (memory gradient: keep last 8 turns verbatim, fold older ones into one `<earlier_conversation>` block). |
-| `schwartz.py` | Schwartz's 10 universal values (Schwartz 1992) + alias coercion + `normalize_value_entry()`. Used to tag entries in the `values` slot. |
+### `prompts/`
 
-### `empathy/` — read, critique, extract
+Every prompt and every block of text lemon ever sees.
 
-| file | purpose |
-|---|---|
-| `emotion.py` | 23-label phasic emotion schema, family map (sad / anger / fear / self-conscious / positive / etc.), validator. Family map drives the mood-congruence boost in memory retrieval. |
-| `tom.py` | Theory-of-mind schema (`feeling` / `avoid` / `what_helps`) and validator. |
-| `user_read.py` | The merged pre-gen LLM call. Returns 4 sub-objects: emotion + ToM + user_state_delta + lemon_state_delta. Asymmetric clamping (`_clamp_lemon_delta`) enforces lemon's tighter dynamics (PAD ±0.10 vs user's ±0.15; lemon's traits and values frozen). |
-| `post_exchange.py` | The post-gen LLM call. Facts only (state moved pre-reply in stage 2 of the dyadic-state work). Runs in a daemon thread so the user never waits on it. |
-| `fact_extractor.py` | Fact-key regex + value-hygiene validator + dedup gate that prevents the LLM from inventing key mutations like `_v2` / `_updated`. |
-| `empathy_check.py` | 12 regex detectors run against the draft. Pure Python, no LLM. Detects minimizing, toxic positivity, advice-pivot, validation cascade, therapy-speak, sycophancy, etc. The graph's most-connected node (`check_response`, 50 edges). On failure, the pipeline regenerates once with the critique appended. |
+- **`__init__.py`** is the big one (~900 lines). The persona prompt,
+  the 23-label emotion vocabulary, every `format_*_block` function,
+  and the two prompt builders for `user_read` and `bookkeep`.
+- **`persona.py`** holds lemon's static identity: a Big 5 trait vector
+  and a small adaptations dict (goals, values tagged with Schwartz
+  categories, concerns, relational stance).
+- **`prompt_stack.py`** is two helpers: `replace_system_block()` (swap a
+  tagged block in place) and `compress_history()` (keep the last 8 turns
+  verbatim, fold older ones into one summary block).
+- **`schwartz.py`** is Schwartz's 10 universal values and a normalizer.
+  Used to tag every entry in the `values` slot.
 
-### `llm/` — wire layer
+### `empathy/`
 
-| file | purpose |
-|---|---|
-| `chat.py` | OpenRouter HTTP call via `requests`. Anthropic-style `cache_control: ephemeral` breakpoint on the persona block (cached free after turn 1 on Anthropic models). Two entry points: `iter_chat` (streaming generator) and `generate_reply` (buffered, used by the pipeline since the post-check needs a complete draft). |
-| `parse_utils.py` | `strip_json_fences()` (tolerant of ```json fences) and `format_recent_for_prompt()` (renders the last ~6 non-system turns for classifier prompts). |
+The "read the user, critique the draft, extract facts" stack.
 
-### `storage/` — persistence + retrieval
+- **`emotion.py`** has the 23-label emotion schema and the family map
+  (sad / anger / fear / self_conscious / positive / etc.) used by
+  memory retrieval.
+- **`tom.py`** has the theory-of-mind schema (`feeling`, `avoid`,
+  `what_helps`).
+- **`user_read.py`** is the merged pre-reply LLM call. It returns four
+  things: emotion, ToM, your state delta, lemon's state delta. A small
+  helper inside it (`_clamp_lemon_delta`) makes lemon's deltas tighter
+  than yours so she stays stable while you can swing.
+- **`post_exchange.py`** is the post-reply LLM call. Just facts now;
+  state moved pre-reply.
+- **`fact_extractor.py`** is the validator and dedup gate that stops the
+  LLM from inventing key mutations like `sleep_status_v2`.
+- **`empathy_check.py`** is 12 regex detectors that run on the draft
+  before it ships. Catches minimizing, toxic positivity, advice-pivot,
+  validation cascades, therapy-speak, and a handful more. If anything
+  trips, the pipeline regenerates once with the critique.
 
-| file | purpose |
-|---|---|
-| `db.py` | SQLite layer. Six tables (`sessions`, `messages`, `state_snapshots` [legacy archive], `lemon_state_snapshots`, `user_state_snapshots`, `facts`) + one FTS5 virtual table (`messages_fts`, porter stemmer). Idempotent schema, three additive migrations versioned via a `schema_version` table. Every helper is a short-lived `@contextmanager connect()` block. |
-| `memory.py` | Composite-scored retrieval. Pulls candidates via FTS5 then re-ranks with a four-signal score: lexical (sigmoid-normalized BM25) + recency (half-life) + intensity + emotion-relatedness (family-aware). Falls back to recent-only when FTS yields nothing. |
-| `lemon_state.py` | Lemon's three-layer state: defaults (built from `persona`), session-start re-pegging (PAD baseline, persona-baseline relational stance + values), legacy-shape migrator that converts old 6-field `state_snapshots` rows on first load. |
-| `user_state.py` | User's three-layer state. Same shape as lemon's; different dynamics (no session-start overrides — users carry in whatever they had). Defines `validate_delta` and `apply_delta`, shared by both agents. |
-| `state.py` | DEPRECATED 6-field shim. Kept only for the legacy migration path. New code shouldn't touch it. |
+### `llm/`
 
-### `temporal/` — time helpers
+The wire layer.
 
-| file | purpose |
-|---|---|
-| `age.py` | `humanize_age()`: `today` / `yesterday` / `N days ago` / `N weeks ago` rendering for memory blocks. Plus `recency_decay()` (half-life weight) used by the memory scorer. |
-| `clock.py` | `time_of_day_label()` (morning / afternoon / late night / very late night buckets) and `session_duration_note()` for the `<time_context>` block. Drives lemon's time-aware tone (low-key after 11pm, fresher in the morning). |
+- **`chat.py`** does the OpenRouter call via `requests`, with
+  Anthropic-style `cache_control` on the persona block (effectively free
+  after turn 1 on Anthropic models).
+- **`parse_utils.py`** has two utilities every classifier uses:
+  `strip_json_fences()` and a recent-messages formatter for the prompts.
+
+### `storage/`
+
+SQLite plus a few thin wrappers around it.
+
+- **`db.py`** has the schema, migrations, and CRUD helpers. Six tables
+  plus an FTS5 virtual table for full-text search. Every helper opens a
+  short-lived connection through a context manager.
+- **`memory.py`** does the per-turn retrieval. FTS5 picks candidates,
+  then a four-signal score (lexical + recency + intensity +
+  emotion-family) re-ranks them.
+- **`lemon_state.py`** and **`user_state.py`** hold the three-layer state
+  for each agent. Same shape, different dynamics.
+- **`state.py`** is the deprecated 6-field shim. Kept around so legacy
+  snapshots can still be migrated on first read.
+
+### `temporal/`
+
+Two small files that color lemon's tone by clock.
+
+- **`age.py`**: `humanize_age()` for memory-block timestamps,
+  `recency_decay()` for memory scoring.
+- **`clock.py`**: time-of-day buckets and session-duration notes for
+  the `<time_context>` block. After 11pm lemon gets quieter; in the
+  morning she's a bit fresher.
 
 ### `templates/` + `static/`
 
-Vanilla JS single-page chat UI in `templates/index.html`. No build step.
-Sidebar shows lemon's full state, user's full state, facts, and recent
-sessions — all auto-refreshed after every turn and every slash command.
-Light/dark theme toggle via CSS custom properties; preference stored in
+One HTML file with inline CSS and vanilla JS. Sidebar shows lemon's full
+state, your full state, your facts, and recent sessions, all
+auto-refreshing after every turn. Light/dark toggle stored in
 `localStorage`.
 
 ---
 
-## 5. Frameworks & dependencies
+## 5. Frameworks and dependencies
 
-Python 3.12. The dependency surface is intentionally small.
+Python 3.12. The list is intentionally short.
 
 | dep | role |
 |---|---|
-| **FastAPI** | Web server (`web.py`). Auto-generates OpenAPI docs at `/docs` and `/redoc`. |
-| **uvicorn** | ASGI server for the FastAPI app. |
-| **requests** (2.32.5) | Synchronous HTTP client used for OpenRouter calls (`llm/chat.py`, `empathy/user_read.py`, `empathy/post_exchange.py`). |
-| **pydantic** (2.9.2) | Request/response models for the FastAPI endpoints. |
-| **python-dotenv** (1.2.2) | Loads `.env` at config import time. |
-| **pytest** (8.3.3) | Test runner. `pytest.ini` sets `pythonpath = src` so tests import `app.*`, `core.*`, `prompts.*` directly. |
-| **sqlite3** (stdlib) | Local single-file persistence + FTS5 + external-content tables + triggers for FTS sync. |
-| **OpenRouter** (HTTP API) | LLM gateway. Default model: `anthropic/claude-haiku-4.5` for both chat and auxiliary calls. Anthropic-style prompt caching is enabled by default for `anthropic/*` models. |
+| FastAPI | Web app + auto OpenAPI docs at `/docs`. |
+| uvicorn | ASGI server. |
+| requests | HTTP to OpenRouter. |
+| pydantic | FastAPI request/response models. |
+| python-dotenv | Loads `.env` at config import. |
+| pytest | Test runner. `pytest.ini` puts `src/` on the path. |
+| sqlite3 (stdlib) | Single-file persistence + FTS5. |
+| OpenRouter (HTTP) | LLM gateway. Default model: `anthropic/claude-haiku-4.5` for everything (chat + classifiers). |
 
-No vector DB, no embeddings, no async framework, no ORM, no auth layer.
-Single user, single process, localhost-only.
+No vector DB, no embeddings, no ORM, no async framework, no auth. One
+process, one user, localhost only.
 
 ---
 
-## 6. Data shapes
+## 6. The four objects you'll see everywhere
 
-The system has four canonical objects you'll see referenced everywhere.
-
-**Three-layer state** (one per agent — same schema for lemon and user):
+**Three-layer state** (lemon and you have one each, same shape):
 
 ```python
 {
-    "traits": {                        # Big 5 / OCEAN, each in [-1, +1]
-        "openness": float, "conscientiousness": float, "extraversion": float,
-        "agreeableness": float, "neuroticism": float,
+    "traits": {                            # Big 5, each in [-1, +1]
+        "openness": ..., "conscientiousness": ..., "extraversion": ...,
+        "agreeableness": ..., "neuroticism": ...,
     },
-    "adaptations": {
+    "adaptations": {                       # mid-term context
         "current_goals":     list[str],
         "values":            list[{"label": str, "schwartz": str | None}],
         "concerns":          list[str],
         "relational_stance": str | None,
     },
-    "state": {                         # PAD core affect, each in [-1, +1]
-        "pleasure": float, "arousal": float, "dominance": float,
-        "mood_label": str,             # derived; folksy whitelist
+    "state": {                             # PAD mood, each in [-1, +1]
+        "pleasure": ..., "arousal": ..., "dominance": ...,
+        "mood_label": str,
     },
 }
 ```
 
-**Phasic emotion event** (per turn, ephemeral, separate from state):
+**Phasic emotion** (this turn only, not stored separately):
 
 ```python
-{
-    "primary":         "joy" | "sadness" | "tired" | ... (23 labels),
-    "intensity":       float,    # [0, 1]
-    "underlying_need": str | None,
-    "undertones":      list[str],
-}
+{"primary": <one of 23 labels>, "intensity": float,
+ "underlying_need": str | None, "undertones": [...]}
 ```
 
-**`PipelineTrace`** (one per turn, attached to `ctx.last_trace`):
+**`PipelineTrace`** (per turn, on `ctx.last_trace`): every intermediate
+output the pipeline produces. Surfaces via `/why` and `GET /trace`.
 
-```python
-emotion, tom, draft, check, regenerated, final, memories, facts_extracted,
-user_state_before, user_state_after, user_state_delta,
-lemon_state_before, lemon_state_after, lemon_state_delta
-```
-
-Surfaces via `/why` (slash command) and `GET /trace` (HTTP endpoint).
-
-**Message envelope** (a row in `messages`):
-
-```python
-{id, session_id, role, content, created_at, emotion, intensity, salience}
-```
-
-Emotion / intensity / salience populated only on user rows by the
-pre-reply read; assistant rows leave them NULL.
+**Message envelope** (a row in the `messages` table): id, session_id,
+role, content, created_at, plus emotion / intensity / salience on user
+rows.
 
 ---
 
-## 7. State persistence
+## 7. What gets persisted
 
-| object | table | when written |
+| object | table | written when |
 |---|---|---|
-| Session boundaries | `sessions` | start_session at boot, end_session at shutdown |
-| Every message | `messages` (+ `messages_fts` via triggers) | per turn, both user and assistant |
-| Lemon's tonic state | `lemon_state_snapshots` | per turn, **pre-reply** (in pipeline) |
-| User's tonic state | `user_state_snapshots` | per turn, **pre-reply** (in pipeline) |
-| Durable user facts | `facts` (key/value, upsert) | post-reply via `bookkeep`, or via `/remember` |
-| Legacy 6-field state | `state_snapshots` | DEPRECATED — read-only archive |
+| Sessions | `sessions` | start at boot, end at shutdown |
+| Every message | `messages` (+ FTS5 mirror) | per turn, both sides |
+| Lemon's tonic state | `lemon_state_snapshots` | per turn, pre-reply |
+| Your tonic state | `user_state_snapshots` | per turn, pre-reply |
+| Facts about you | `facts` (key/value, upsert) | post-reply via `bookkeep`, or `/remember` |
+| Old 6-field state | `state_snapshots` | deprecated, read-only archive |
 
-Phasic emotion events are not stored as a separate object; they're written
-as the `emotion`/`intensity` columns on the user message row.
-
-The whole DB is a single `.lemon.db` file at the project root. Schema is
-version 3 (most recent migration added `lemon_state_snapshots` for stage 3
-of the dyadic-state work).
+The whole thing is one `.lemon.db` file at the project root. Schema
+version 3 right now.
 
 ---
 
-## 8. External entry points
-
-**Two ways to chat:**
+## 8. How to run it
 
 ```bash
 # CLI
 PYTHONPATH=src python -m app.lem
 
-# Web UI (FastAPI + SSE)
+# Web (FastAPI + SSE)
 PYTHONPATH=src python -m app.web
 # or:
 uvicorn app.web:app --reload --app-dir src
 ```
 
-**HTTP API surface** (web only):
+The web server exposes nine HTTP endpoints. The interesting ones:
 
-| method + path | tag | what it does |
-|---|---|---|
-| `GET /` | chat | Bundled single-page UI |
-| `POST /chat` | chat | Streams a reply via SSE (events: `phase`, `token`, `done`, `error`) |
-| `POST /command` | chat | Runs a slash command, returns `{output, exit}` |
-| `GET /state` | introspection | Lemon's three-layer tonic state |
-| `GET /user_state` | introspection | User's three-layer tonic state (same schema) |
-| `GET /facts` | introspection | Stored user facts |
-| `GET /sessions` | introspection | Last 20 sessions |
-| `GET /history` | introspection | Current session's user/assistant turns |
-| `GET /trace` | introspection | Last `PipelineTrace` as JSON |
-| `GET /ping`, `GET /health` | health | Liveness + readiness probes |
-| `GET /docs`, `GET /redoc` | meta | Auto-generated OpenAPI explorers |
+- `POST /chat` streams replies as Server-Sent Events.
+- `POST /command` runs a slash command.
+- `GET /state`, `/user_state`, `/facts`, `/sessions`, `/history`, `/trace`
+  are read-only introspection.
+- `GET /docs` is the auto-generated Swagger UI.
 
-**Slash commands** (work in both CLI and web): `/help`, `/state`,
-`/user_state`, `/reset`, `/facts`, `/remember`, `/forget`, `/history`,
-`/rewind`, `/clear`, `/export`, `/model`, `/sessions`, `/search`,
-`/recall`, `/stats`, `/config`, `/empathy`, `/autofacts`, `/cache`, `/why`,
-`/quit`. See [`slash_commands.md`](slash_commands.md) for the full reference.
+Slash commands work the same in the CLI and the web composer. The full
+list lives in [`slash_commands.md`](slash_commands.md).
 
 ---
 
-## 9. How the pieces relate to the goal
+## 9. What it doesn't do
 
-| project goal | how it shows up |
-|---|---|
-| Two interacting agents, both with state | Three-layer schema in `storage/{lemon,user}_state.py`, persisted in two parallel snapshot tables. Both updated **pre-reply** in one merged LLM call. |
-| Reply downstream of state | The pipeline applies both deltas → persists → re-injects `<lemon_state>` block → only then runs `generate_reply`. So the reply call sees freshly-nudged states. |
-| Cross-session memory | `messages_fts` (FTS5 with porter stemmer) + composite scoring in `storage/memory.py`. Past user messages from other sessions surface based on lexical relevance + recency + intensity + emotion-family congruence. |
-| Texting-not-therapy tone | `LEMON_PROMPT` enforces texting-register voice + "no advice unless asked" + "never name your state". `empathy_check`'s 12 detectors catch common AI-empathy failure modes (minimizing, toxic positivity, validation cascade) and trigger a regenerate-once. |
-| Friend persona stability | Lemon's traits + values are persona-fixed (`persona.LEMON_TRAITS`, `persona.LEMON_ADAPTATIONS`). `_clamp_lemon_delta` zeros out trait nudges and tightens her PAD bounds (±0.10 vs user's ±0.15). She can quietly carry a concern about you, but she doesn't mood-mirror. |
-| Both agents psychologically grounded | Big 5 (OCEAN) for traits — empirically dominant over MBTI / Enneagram. PAD (Mehrabian-Russell) for state — continuous, used in computational affective agents. Schwartz (1992) for value tagging. McAdams' three-level framework as the integrating scaffold. See [`dyadic_state.md`](dyadic_state.md) §6 for the full grounding. |
-
----
-
-## 10. Non-goals + known limits
-
-- **Single-user, single-process.** `web.py` keeps one global `ChatContext`.
-  Two browser tabs against the same server share one conversation.
-- **No auth.** `web.py` is localhost-only by default. Don't expose past
-  the loopback without a reverse proxy.
-- **Post-check is regex, not semantic.** Paraphrases of minimizing or
-  validation-cascade phrases will slip through. Tier-2 ideas (best-of-N,
-  multi-agent critic, semantic check) are sketched in `empathy_research.md`.
-- **No vector DB.** Memory retrieval is BM25 + composite scoring.
-  Catches `sleep / sleeping / slept` via porter stemming but not paraphrases
-  (`exhausted` ↔ `wiped out`). Adding embedding similarity is listed as
-  the highest-return future work in `memory_architecture.md`.
-- **User trait inference is essentially frozen** (per-turn cap of ±0.02).
-  Real trait estimation would need an offline aggregation pass over
-  many sessions; sketched in `dyadic_state.md` §11.
+- **Multi-user.** Two browser tabs against the same server share one
+  conversation. There's no auth either, so don't expose past localhost.
+- **Semantic memory retrieval.** It's BM25 plus a small composite scorer.
+  `slept` and `sleep` match (porter stemming), but `exhausted` and
+  `wiped out` don't. Adding embeddings is the highest-return future
+  work; see `memory_architecture.md`.
+- **Real personality inference.** Trait nudges per turn are capped tight
+  enough that the user's Big 5 estimate is essentially frozen. A real
+  inference pass would aggregate across many sessions offline.
+- **Semantic empathy check.** The 12 regex detectors catch known
+  failure modes by phrase. Paraphrases of the same failure modes will
+  slip through. `empathy_research.md` lists the next steps.
 
 ---
 
-## 11. Where to look next
+## 10. Where to read next
 
-- **[`TECHNICAL.md`](TECHNICAL.md)** — full module-by-module reference.
-  Per-turn lifecycle, every prompt block, every test pattern, every
-  config knob.
-- **[`dyadic_state.md`](dyadic_state.md)** — the three-layer state design.
-  Why Big 5 + PAD + Schwartz, the McAdams scaffold, asymmetric dynamics,
-  the three-stage migration from the old 6-field internal_state.
-- **[`memory_architecture.md`](memory_architecture.md)** — the three
-  memory tiers (facts, episodic, working history), composite scoring
-  formula with default weights, FTS5 setup, eval harness.
-- **[`empathy_research.md`](empathy_research.md)** — survey of the
-  algorithmic-empathy literature this pipeline is built on, with notes on
-  what's currently implemented vs Tier-2 / Tier-3 future work.
-- **[`slash_commands.md`](slash_commands.md)** — full slash-command
-  reference with examples.
-- **[`db_schema.md`](db_schema.md)** — column-by-column SQLite reference.
-- **[`web_ui.md`](web_ui.md)** — FastAPI endpoints + SSE protocol +
-  frontend layout.
-- **[`BENCHMARKING.md`](BENCHMARKING.md)** — how to evaluate lemon's
-  empathic quality (EQ-Bench 3, HEART, CES-LCC, ablations).
-- **[`graphify-out/GRAPH_REPORT.md`](../graphify-out/GRAPH_REPORT.md)** —
+- **[`TECHNICAL.md`](TECHNICAL.md)** is the full reference: every module,
+  every call path, every config knob.
+- **[`dyadic_state.md`](dyadic_state.md)** is the long version of the
+  three-layer state design. Why Big 5 + PAD + Schwartz, why the McAdams
+  scaffold, what changed in each migration stage.
+- **[`memory_architecture.md`](memory_architecture.md)** is the long
+  version of section 3's memory step. The composite scoring formula,
+  FTS5 setup, eval harness.
+- **[`empathy_research.md`](empathy_research.md)** surveys the
+  algorithmic-empathy literature this pipeline is built on, and flags
+  what's implemented vs future work.
+- **[`slash_commands.md`](slash_commands.md)**, **[`web_ui.md`](web_ui.md)**,
+  **[`db_schema.md`](db_schema.md)**, **[`BENCHMARKING.md`](BENCHMARKING.md)**
+  are smaller targeted references.
+- **[`graphify-out/GRAPH_REPORT.md`](../graphify-out/GRAPH_REPORT.md)** is
   the auto-generated knowledge graph: god nodes, communities, suggested
-  questions. Refresh with `graphify update .`.
+  questions to dig into. Refresh it with `graphify update .` after any
+  layout change.
