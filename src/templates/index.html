@@ -327,13 +327,14 @@
       });
     }
 
-    // Render a three-layer state (lemon or user) as compact prose.
-    // For lemon: hide traits (persona-fixed) and values (persona-fixed).
-    // For user: show trait descriptors (slowly inferred), goals, values, concerns, stance.
-    function formatStateBlock(state, opts) {
-      opts = opts || {};
+    // Render the FULL three-layer state (lemon or user). Always shows every
+    // field: mood label, all three PAD coordinates, all five Big 5 traits with
+    // signed values, and every adaptation slot (goals / values / concerns /
+    // stance) with "(none)" placeholders when empty. Same format for both
+    // agents — the schema is symmetric, so the render is symmetric.
+    function formatFullStateBlock(state, coldMessage) {
       if (!state || Object.keys(state).length === 0) {
-        return opts.coldMessage || "(no state yet)";
+        return coldMessage || "(no state yet)";
       }
       const s = state.state || {};
       const traits = state.traits || {};
@@ -343,69 +344,47 @@
       const arousal = Number(s.arousal || 0);
       const dominance = Number(s.dominance || 0);
 
+      // Cold-start collapse: zeroed PAD + neutral mood + no adaptations means
+      // we have no inferred signal yet. Show a single hint line instead of a
+      // wall of zeros.
       const isPadZero = Math.abs(pleasure) < 1e-6 && Math.abs(arousal) < 1e-6 && Math.abs(dominance) < 1e-6;
-      const adaptKeys = ["current_goals", "values", "concerns"];
-      const noAdapt = adaptKeys.every(k => !(adapt[k] && adapt[k].length)) && !adapt.relational_stance;
-      if (isPadZero && noAdapt && mood === "neutral") {
-        return opts.coldMessage || "(first read — no signal yet)";
+      const noAdapt =
+        !(adapt.current_goals && adapt.current_goals.length) &&
+        !(adapt.values && adapt.values.length) &&
+        !(adapt.concerns && adapt.concerns.length) &&
+        !adapt.relational_stance;
+      const noTraitSignal = ["openness", "conscientiousness", "extraversion", "agreeableness", "neuroticism"]
+        .every(k => Math.abs(Number(traits[k] || 0)) < 1e-6);
+      if (isPadZero && noAdapt && noTraitSignal && mood === "neutral") {
+        return coldMessage || "(first read — no signal yet)";
       }
 
-      const lines = [];
       const fmt = (n) => (n >= 0 ? "+" : "") + n.toFixed(2);
-      lines.push(`mood: ${mood}  (P${fmt(pleasure)} A${fmt(arousal)} D${fmt(dominance)})`);
-
-      if (opts.showTraits) {
-        const traitOrder = [
-          ["openness", "O"], ["conscientiousness", "C"], ["extraversion", "E"],
-          ["agreeableness", "A"], ["neuroticism", "N"],
-        ];
-        const descriptors = [];
-        for (const [k, abbr] of traitOrder) {
-          const v = Number(traits[k] || 0);
-          if (Math.abs(v) < 0.15) continue;
-          const tag = v >= 0.5 ? "high" : v <= -0.5 ? "low" : v > 0 ? "somewhat" : "slightly low";
-          descriptors.push(`${tag} ${abbr}`);
-        }
-        if (descriptors.length) lines.push("traits: " + descriptors.join(", "));
+      const lines = [];
+      lines.push(`mood: ${mood}`);
+      lines.push(`PAD: pleasure ${fmt(pleasure)}, arousal ${fmt(arousal)}, dominance ${fmt(dominance)}`);
+      lines.push("traits:");
+      for (const k of ["openness", "conscientiousness", "extraversion", "agreeableness", "neuroticism"]) {
+        const v = Number(traits[k] || 0);
+        lines.push(`  ${k.padEnd(18)} ${fmt(v)}`);
       }
-      if (adapt.current_goals && adapt.current_goals.length) {
-        lines.push("goals: " + adapt.current_goals.join(", "));
-      }
-      if (opts.showValues && adapt.values && adapt.values.length) {
-        lines.push("values: " + adapt.values.join(", "));
-      }
-      if (adapt.concerns && adapt.concerns.length) {
-        lines.push("concerns: " + adapt.concerns.join(", "));
-      } else if (opts.showConcernsWhenEmpty) {
-        lines.push("concerns: (none)");
-      }
-      if (adapt.relational_stance) {
-        lines.push("stance: " + adapt.relational_stance);
-      }
+      lines.push("adaptations:");
+      lines.push(`  goals:    ${(adapt.current_goals || []).join(", ") || "(none)"}`);
+      lines.push(`  values:   ${(adapt.values || []).join(", ") || "(none)"}`);
+      lines.push(`  concerns: ${(adapt.concerns || []).join(", ") || "(none)"}`);
+      lines.push(`  stance:   ${adapt.relational_stance || "(none)"}`);
       return lines.join("\n");
     }
 
     async function loadState() {
       const r = await fetch("/state");
       const state = await r.json();
-      // lemon: hide traits + values (both persona-fixed); show concerns even when empty
-      $("state").textContent = formatStateBlock(state, {
-        showTraits: false,
-        showValues: false,
-        showConcernsWhenEmpty: true,
-        coldMessage: "(no lemon state yet)",
-      });
+      $("state").textContent = formatFullStateBlock(state, "(no lemon state yet)");
     }
     async function loadUserState() {
       const r = await fetch("/user_state");
       const state = await r.json();
-      // user: show traits (slowly inferred) and values (rare additions)
-      $("user-state").textContent = formatStateBlock(state, {
-        showTraits: true,
-        showValues: true,
-        showConcernsWhenEmpty: false,
-        coldMessage: "(first read — no signal yet)",
-      });
+      $("user-state").textContent = formatFullStateBlock(state, "(first read — no signal yet)");
     }
     async function loadFacts() {
       const r = await fetch("/facts");
