@@ -72,7 +72,8 @@
       transition: opacity 0.15s, background 0.15s;
     }
     .bubble.system .system-toggle:hover { opacity: 1; background: var(--border); }
-    .bubble.system.collapsed { padding: 6px 36px 6px 12px; }
+    .bubble.system.collapsed { padding: 4px 36px 4px 12px; min-height: 28px; }
+    .bubble.system.collapsed .system-toggle { top: 50%; transform: translateY(-50%); }
     .bubble.system.collapsed .system-content { display: none; }
     .typing { align-self: flex-start; color: var(--muted); font-style: italic; padding: 4px 14px; display: flex; align-items: center; gap: 8px; }
     .typing .phase-label { transition: opacity 0.25s ease; display: inline-block; }
