@@ -39,10 +39,15 @@ Everything is synchronous on the critical path; post-gen bookkeeping runs in a d
 ```bash
 pip install -r requirements.txt
 echo 'OPENROUTER_API_KEY=sk-or-v1-...' > .env
-python src/lem.py            # CLI
-python src/web.py            # web UI on 127.0.0.1:8000
-pytest                       # test suite (after pip install -r requirements-dev.txt)
+PYTHONPATH=src python -m app.lem                         # CLI
+PYTHONPATH=src python -m app.web                         # web UI on 127.0.0.1:8000
+# or:
+uvicorn app.web:app --reload --app-dir src               # alternative web launch
+pytest                                                   # test suite (after pip install -r requirements-dev.txt)
 ```
+
+`pytest.ini` sets `pythonpath = src` so the test suite imports `app.*`,
+`core.*`, `prompts.*`, etc. without manual path setup.
 
 ### 2.2 Environment variables
 
@@ -89,59 +94,76 @@ Three modules call this endpoint: `llm/chat.py`, `empathy/user_read.py`, `empath
 
 ```
 src/
-  config.py              env, models, paths, knobs, HTTP headers
-  pipeline.py            orchestrator: the "empathy pipeline"
-  session_context.py     shared CLI+web helpers: initial history, refresh blocks, bookkeeping thread
-  commands.py            slash-command registry + ChatContext + dispatcher
-  lem.py                 CLI REPL entry point
-  web.py                 FastAPI app + SSE + introspection endpoints
+  app/                       entry points + per-turn orchestration
+    __init__.py              empty package marker
+    lem.py                   CLI REPL entry point (python -m app.lem)
+    web.py                   FastAPI app + SSE + introspection endpoints
+    pipeline.py              orchestrator: the "empathy pipeline"
+    session_context.py       shared CLI+web helpers: initial history, refresh blocks, bookkeeping thread
+    commands.py              slash-command registry + ChatContext + dispatcher
 
-  prompts.py             single source of truth for every prompt + block formatter
-  persona.py             LEMON_TRAITS (Big 5) + LEMON_ADAPTATIONS (goals/Schwartz-tagged values/concerns/stance)
-  schwartz.py            Schwartz's 10 universal values + alias coercion + entry normalizer
+  core/                      cross-cutting infrastructure
+    __init__.py              empty package marker
+    config.py                env, models, paths, knobs, HTTP headers
+    logging_setup.py         lemon.* logger tree + payload-safe formatters
 
-  empathy/               empathy-pipeline-specific logic
-    emotion.py           23-label emotion schema, families, validator
-    tom.py               theory-of-mind schema, validator
-    fact_extractor.py    fact-key regex + value-hygiene validator
-    empathy_check.py     12-detector regex post-check
-    user_read.py         merged pre-gen LLM call (4 sub-objects, including both state deltas)
-    post_exchange.py     post-gen LLM call (facts only since stage 2)
+  prompts/                   every prompt + every block formatter
+    __init__.py              the big one — block formatters, build_user_read_prompt, build_bookkeep_prompt, EMOTION_LABELS, all the *_TAG constants
+    persona.py               LEMON_TRAITS (Big 5) + LEMON_ADAPTATIONS (goals/Schwartz-tagged values/concerns/stance)
+    prompt_stack.py          replace_system_block + compress_history
+    schwartz.py              Schwartz's 10 universal values + alias coercion + entry normalizer
 
-  llm/                   raw LLM wire + parsing helpers
-    chat.py              OpenRouter reply call, cache wrap, streaming
-    parse_utils.py       shared fence-stripper + recent-msgs prompt formatter
+  empathy/                   empathy-pipeline-specific logic
+    emotion.py               23-label emotion schema, families, validator
+    tom.py                   theory-of-mind schema, validator
+    fact_extractor.py        fact-key regex + value-hygiene validator
+    empathy_check.py         12-detector regex post-check
+    user_read.py             merged pre-gen LLM call (4 sub-objects, including both state deltas)
+    post_exchange.py         post-gen LLM call (facts only since stage 2)
 
-  storage/               persistence + retrieval
-    db.py                SQLite layer: schema, migrations, CRUD helpers
-    memory.py            emotion-tagged message retrieval + <emotional_memory> formatter
-    lemon_state.py       lemon's three-layer state: defaults, load/save, validator, legacy migrator
-    user_state.py        user's three-layer state: defaults, load/save, validator, apply_delta
-    state.py             DEPRECATED legacy 6-field state (kept as shim for migration path)
+  llm/                       raw LLM wire + parsing helpers
+    chat.py                  OpenRouter reply call, cache wrap, streaming
+    parse_utils.py           shared fence-stripper + recent-msgs prompt formatter
+
+  storage/                   persistence + retrieval
+    db.py                    SQLite layer: schema, migrations, CRUD helpers
+    memory.py                emotion-tagged message retrieval + <emotional_memory> formatter
+    lemon_state.py           lemon's three-layer state: defaults, load/save, validator, legacy migrator
+    user_state.py            user's three-layer state: defaults, load/save, validator, apply_delta
+    state.py                 DEPRECATED legacy 6-field state (kept as shim for migration path)
+
+  temporal/                  time-context helpers (humanize_age, time_of_day, session_duration_note)
 
   templates/
-    index.html           single-page web UI (vanilla JS, inline CSS)
+    index.html               single-page web UI (vanilla JS, inline CSS)
   static/
-    lemon.png            favicon and on-page logo
-tests/                   one test file per src/ module + conftest.py
-docs/                    architecture, dyadic_state, slash commands, db schema, web ui, empathy research, memory architecture
+    lemon.png                favicon and on-page logo
+tests/                       one test file per src/ module + conftest.py
+docs/                        architecture, dyadic_state, slash commands, db schema, web ui, empathy research, memory architecture
 ```
+
+After the 2026-04-27 reorganization, **everything in `src/` lives in a folder**. The three new packages are:
+
+- **`app`** — entry points (`lem`, `web`) and per-turn orchestration (`pipeline`, `session_context`, `commands`). Internal imports use relative form: `from .commands import ChatContext`.
+- **`core`** — cross-cutting infrastructure (`config`, `logging_setup`). Imported as `from core import config` or `from core.config import X`.
+- **`prompts`** — every prompt and block formatter. The package's `__init__.py` is the formerly-top-level `prompts.py`. Sub-modules: `persona`, `prompt_stack`, `schwartz`.
 
 Dependency direction flows top-to-bottom:
 
 ```
-config ──► everything
-storage/db ──► storage/{lemon_state, user_state, memory, state-shim}, commands, pipeline, session_context
+core ──► everything
+storage/db ──► storage/{lemon_state, user_state, memory, state-shim}, app/commands, app/pipeline, app/session_context
 storage/user_state ──► storage/lemon_state (shared validator + apply_delta)
-persona ──► storage/lemon_state, prompts
+prompts/persona ──► storage/lemon_state
+prompts/schwartz ──► storage/user_state
 llm/parse_utils ──► empathy/{emotion,tom,fact_extractor}, empathy/{user_read,post_exchange}
-llm/chat ──► pipeline
-empathy/* ──► pipeline, session_context
-prompts ──► session_context, pipeline
-commands + session_context + pipeline ──► lem.py, web.py
+llm/chat ──► app/pipeline
+empathy/* ──► app/pipeline, app/session_context
+prompts ──► app/session_context, app/pipeline
+app/commands + app/session_context + app/pipeline ──► app/lem, app/web
 ```
 
-There are no cycles. Tests are isolated via an autouse `isolated_db()` fixture in `tests/conftest.py`.
+There are no cycles. Tests are isolated via an autouse `isolated_db()` fixture in `tests/conftest.py`. `pytest.ini` sets `pythonpath = src` so tests import `app.*`, `core.*`, `prompts.*` directly.
 
 ---
 
@@ -857,8 +879,8 @@ DETECTORS.append(("my_thing", _detect_my_thing))
 **Start a chat from scratch:**
 
 ```bash
-python src/lem.py          # CLI
-python src/web.py          # web, open http://127.0.0.1:8000
+PYTHONPATH=src python -m app.lem    # CLI
+PYTHONPATH=src python -m app.web    # web, open http://127.0.0.1:8000
 ```
 
 **Inspect the database:**
@@ -879,7 +901,7 @@ sqlite> SELECT role, content, emotion, intensity
 **Run with the pipeline off:**
 
 ```bash
-LEMON_EMPATHY=0 python src/web.py
+LEMON_EMPATHY=0 PYTHONPATH=src python -m app.web
 ```
 
 **Switch model for one session:**
@@ -894,16 +916,17 @@ LEMON_EMPATHY=0 python src/web.py
 
 | file | purpose |
 |---|---|
-| `config.py` | env vars, model IDs, knobs, HTTP headers |
-| `pipeline.py` | orchestrator: `read_user (→ both states updated) → memory → inject blocks → draft → check → regen-once` |
-| `session_context.py` | `initial_history`, `refresh_base_blocks`, `run_bookkeeping` — shared CLI+web |
-| `commands.py` | slash-command registry + 22 built-ins; `ChatContext` (history, lemon_state, user_state, etc.) |
-| `lem.py` | CLI REPL |
-| `web.py` | FastAPI app + SSE + introspection |
-| `prompts.py` | single source of truth for every prompt + every block formatter |
-| `persona.py` | `LEMON_TRAITS` (Big 5) + `LEMON_ADAPTATIONS` (goals/Schwartz-tagged values/concerns/stance) |
-| `schwartz.py` | Schwartz's 10 universal values, descriptions, `coerce_schwartz`, `normalize_value_entry` |
-| `prompt_stack.py` | `replace_system_block` + `compress_history` |
+| `core/config.py` | env vars, model IDs, knobs, HTTP headers |
+| `core/logging_setup.py` | `lemon.*` logger tree, `setup_logging`, `get_logger`, payload-safe formatters |
+| `app/pipeline.py` | orchestrator: `read_user (→ both states updated) → memory → inject blocks → draft → check → regen-once` |
+| `app/session_context.py` | `initial_history`, `refresh_base_blocks`, `run_bookkeeping` — shared CLI+web |
+| `app/commands.py` | slash-command registry + 22 built-ins; `ChatContext` (history, lemon_state, user_state, etc.) |
+| `app/lem.py` | CLI REPL (`python -m app.lem`) |
+| `app/web.py` | FastAPI app + SSE + introspection (`python -m app.web` or `uvicorn app.web:app --app-dir src`) |
+| `prompts/__init__.py` | single source of truth for every prompt + every block formatter |
+| `prompts/persona.py` | `LEMON_TRAITS` (Big 5) + `LEMON_ADAPTATIONS` (goals/Schwartz-tagged values/concerns/stance) |
+| `prompts/schwartz.py` | Schwartz's 10 universal values, descriptions, `coerce_schwartz`, `normalize_value_entry` |
+| `prompts/prompt_stack.py` | `replace_system_block` + `compress_history` |
 | `empathy/emotion.py` | 23-label emotion schema, family map, `_validate` |
 | `empathy/tom.py` | ToM schema, `_validate` |
 | `empathy/fact_extractor.py` | fact-key regex + `_validate` |

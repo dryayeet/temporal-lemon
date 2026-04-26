@@ -14,6 +14,6 @@ def isolated_db(tmp_path, monkeypatch):
     db.py resolves DB_PATH at call time, so this gives every test a fresh database
     and prevents tests from touching the developer's real .lemon.db.
     """
-    import config
+    from core import config
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "lemon.db")
     yield

@@ -2,9 +2,9 @@ import json
 
 import pytest
 
-import config
-import pipeline
-from pipeline import run_empathy_turn
+from app import pipeline
+from app.pipeline import run_empathy_turn
+from core import config
 from storage import db
 
 

@@ -1,6 +1,6 @@
 import copy
 
-from commands import ChatContext, dispatch, is_command
+from app.commands import ChatContext, dispatch, is_command
 from storage import db
 from storage.lemon_state import DEFAULT_LEMON_STATE
 

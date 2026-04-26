@@ -1,4 +1,4 @@
-from prompt_stack import compress_history, replace_system_block
+from prompts.prompt_stack import compress_history, replace_system_block
 
 
 def sys_msg(content):

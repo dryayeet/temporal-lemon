@@ -27,8 +27,8 @@ from __future__ import annotations
 import copy
 from typing import Optional
 
-from logging_setup import get_logger
-from persona import LEMON_ADAPTATIONS, LEMON_TRAITS
+from core.logging_setup import get_logger
+from prompts.persona import LEMON_ADAPTATIONS, LEMON_TRAITS
 from storage.db import latest_lemon_state, save_lemon_state_snapshot, latest_state
 from storage.user_state import (
     MOOD_LABELS,

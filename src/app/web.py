@@ -1,9 +1,9 @@
 """Lemon web UI: FastAPI + single-page HTML, SSE streaming for chat.
 
 Run with:
-    uvicorn web:app --reload --app-dir src
+    uvicorn app.web:app --reload --app-dir src
 or:
-    python src/web.py
+    python -m app.web   (from src/, with src on PYTHONPATH)
 
 Interactive API docs available at:
     http://127.0.0.1:8000/docs    (Swagger UI)
@@ -27,16 +27,17 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-import config
-from commands import ChatContext, dispatch, is_command
-from config import CHAT_MODEL, KEEP_RECENT_TURNS
-from logging_setup import get_logger, preview, setup_logging
-from pipeline import recent_messages_for_context, run_empathy_turn
+from core import config
+from core.config import CHAT_MODEL, KEEP_RECENT_TURNS
+from core.logging_setup import get_logger, preview, setup_logging
 from prompts import LEMON_OPENERS
-from session_context import initial_history, refresh_base_blocks, run_bookkeeping
 from storage import db
 from storage.lemon_state import fresh_lemon_session_state, save_lemon_state
 from storage.user_state import fresh_user_session_state
+
+from .commands import ChatContext, dispatch, is_command
+from .pipeline import recent_messages_for_context, run_empathy_turn
+from .session_context import initial_history, refresh_base_blocks, run_bookkeeping
 
 # Logging must be configured before any module-level code that may emit logs.
 setup_logging()
@@ -126,12 +127,14 @@ log.info(
     _session_id, config.CHAT_MODEL, config.STATE_MODEL,
 )
 
-# The HTML template is static; read it once at import instead of on every GET.
-_INDEX_HTML = (Path(__file__).parent / "templates" / "index.html").read_text(encoding="utf-8")
+# Templates and static assets sit at src/ alongside the package folders, so
+# they're one level UP from app/. The HTML template is read once at import.
+_SRC_ROOT = Path(__file__).resolve().parent.parent
+_INDEX_HTML = (_SRC_ROOT / "templates" / "index.html").read_text(encoding="utf-8")
 
 # Brand asset (favicon + on-page logo). Loaded once into memory so we don't
 # need aiofiles/StaticFiles. ~940KB; trivial for a single-user local app.
-_LEMON_PNG_BYTES = (Path(__file__).parent / "static" / "lemon.png").read_bytes()
+_LEMON_PNG_BYTES = (_SRC_ROOT / "static" / "lemon.png").read_bytes()
 
 
 # ---------- request / response models ----------
@@ -504,7 +507,13 @@ def health() -> HealthResponse:
 
 def main() -> None:
     import uvicorn
-    uvicorn.run("web:app", host="127.0.0.1", port=8000, reload=False, app_dir=str(Path(__file__).parent))
+    uvicorn.run(
+        "app.web:app",
+        host="127.0.0.1",
+        port=8000,
+        reload=False,
+        app_dir=str(_SRC_ROOT),
+    )
 
 
 if __name__ == "__main__":

@@ -20,12 +20,12 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-import config
+from core import config
+from core.logging_setup import get_logger, preview
 from empathy.empathy_check import CheckResult, check_response
 from empathy.user_read import read_user
 from llm.chat import generate_reply
-from logging_setup import get_logger, preview
-from prompt_stack import compress_history
+from prompts.prompt_stack import compress_history
 from prompts import (
     CRITIQUE_TAG,
     LEMON_STATE_TAG,
@@ -145,10 +145,7 @@ def run_empathy_turn(
     turn_id = uuid.uuid4().hex[:8]
     turn_started = time.time()
 
-    log.info(
-        "turn_start turn=%s session=%s msg=%r pipeline=%s",
-        turn_id, session_id, preview(user_msg, 60), config.ENABLE_EMPATHY_PIPELINE,
-    )
+    log.info("turn_start turn=%s msg=%r", turn_id, preview(user_msg, 60))
 
     # ---------- short-circuit when pipeline disabled ----------
     if not config.ENABLE_EMPATHY_PIPELINE:
@@ -164,8 +161,8 @@ def run_empathy_turn(
             db.log_message(session_id, "assistant", reply)
         trace.final = reply
         log.info(
-            "turn_done turn=%s reply_chars=%d elapsed_ms=%d pipeline=off",
-            turn_id, len(reply), int((time.time() - turn_started) * 1000),
+            "turn_done turn=%s ms=%d chars=%d pipeline=off",
+            turn_id, int((time.time() - turn_started) * 1000), len(reply),
         )
         return reply, trace
 
@@ -197,13 +194,9 @@ def run_empathy_turn(
     trace.user_state_after = user_state_after
     trace.lemon_state_delta = lemon_state_delta
     trace.lemon_state_after = lemon_state_after
-    log.info(
-        "phase=reading elapsed_ms=%d emotion=%s user_mood=%s lemon_mood=%s",
-        int((time.time() - phase_started) * 1000),
-        emotion.get("primary"),
-        user_state_after.get("state", {}).get("mood_label"),
-        lemon_state_after.get("state", {}).get("mood_label"),
-    )
+    # phase=reading is redundant with the user_read line emitted by
+    # empathy.user_read.read_user; that line already covers elapsed_ms,
+    # emotion, and both mood labels. Skip the duplicate at info level.
 
     # Persist both tonic states immediately. A crash during retrieval/generation
     # still preserves the read. Fire-and-forget; failures don't break the turn.
@@ -237,7 +230,7 @@ def run_empathy_turn(
         limit=config.MEMORY_RETRIEVAL_LIMIT,
     )
     log.info(
-        "phase=remembering elapsed_ms=%d retrieved=%d",
+        "remember ms=%d hits=%d",
         int((time.time() - phase_started) * 1000), len(memories),
     )
     trace.memories = memories
@@ -276,7 +269,7 @@ def run_empathy_turn(
     phase_started = time.time()
     draft = generate_reply(history, model=model)
     log.info(
-        "phase=replying elapsed_ms=%d chars=%d",
+        "reply ms=%d chars=%d",
         int((time.time() - phase_started) * 1000), len(draft),
     )
     trace.draft = draft
@@ -284,10 +277,14 @@ def run_empathy_turn(
     # ---------- 4. post-check ----------
     check = check_response(user_msg, draft, emotion)
     trace.check = check
-    log.info(
-        "empathy_check passed=%s failures=%d",
-        check.passed, len(getattr(check, "failures", []) or []),
-    )
+    # Only log on failure — passing the check is the common case (~95%+) and
+    # silent passes keep the per-turn log noise down. Failure detail flows
+    # through the `regenerated` and `regenerate_failed` lines below.
+    if not check.passed:
+        log.info(
+            "empathy_check failed failures=%d",
+            len(getattr(check, "failures", []) or []),
+        )
 
     final = draft
     if not check.passed and config.EMPATHY_RETRY_ON_FAIL:
@@ -301,7 +298,7 @@ def run_empathy_turn(
                 final = second
                 trace.regenerated = True
                 log.info(
-                    "regenerated elapsed_ms=%d chars=%d",
+                    "regen ms=%d chars=%d",
                     int((time.time() - phase_started) * 1000), len(final),
                 )
             else:
@@ -314,9 +311,9 @@ def run_empathy_turn(
     trace.final = final
 
     log.info(
-        "turn_done turn=%s chars=%d regenerated=%s elapsed_ms=%d",
-        turn_id, len(final), trace.regenerated,
-        int((time.time() - turn_started) * 1000),
+        "turn_done turn=%s ms=%d chars=%d%s",
+        turn_id, int((time.time() - turn_started) * 1000), len(final),
+        " regen" if trace.regenerated else "",
     )
 
     # Post-exchange bookkeeping (facts + state nudge) runs OUTSIDE the pipeline

@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-import config
+from core import config
 from storage import db
 from storage import lemon_state as lemon_state_mod
 

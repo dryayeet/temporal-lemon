@@ -19,12 +19,12 @@ from storage.lemon_state import (
 # ---------- DEFAULT_LEMON_STATE comes from persona ----------
 
 def test_default_pulls_traits_from_persona():
-    from persona import LEMON_TRAITS
+    from prompts.persona import LEMON_TRAITS
     assert DEFAULT_LEMON_STATE["traits"] == LEMON_TRAITS
 
 
 def test_default_pulls_adaptations_from_persona():
-    from persona import LEMON_ADAPTATIONS
+    from prompts.persona import LEMON_ADAPTATIONS
     assert DEFAULT_LEMON_STATE["adaptations"]["values"] == LEMON_ADAPTATIONS["values"]
     assert DEFAULT_LEMON_STATE["adaptations"]["relational_stance"] == LEMON_ADAPTATIONS["relational_stance"]
 
@@ -44,7 +44,7 @@ def test_default_values_are_schwartz_tagged():
 def test_fresh_session_repulls_values_from_persona():
     """If a previous snapshot has stale untagged values, fresh_lemon_session_state
     should re-pull tagged values from persona."""
-    from persona import LEMON_ADAPTATIONS
+    from prompts.persona import LEMON_ADAPTATIONS
     stale = copy.deepcopy(DEFAULT_LEMON_STATE)
     stale["adaptations"]["values"] = ["honesty", "calm"]   # legacy untagged
     save_lemon_state(stale)

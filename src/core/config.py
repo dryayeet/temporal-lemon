@@ -48,10 +48,11 @@ ENABLE_AUTO_FACTS = os.getenv("LEMON_AUTO_FACTS", "1") not in ("0", "false", "no
 AUTO_FACTS_MAX_PER_TURN = int(os.getenv("LEMON_AUTO_FACTS_MAX", "3"))
 
 # --- PATHS ---
-# Relative paths are resolved against the project root (one level above src/).
-# Without this, sqlite writes depend on process CWD and split the DB across
-# multiple files when the server and CLI are launched from different dirs.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Relative paths are resolved against the project root (two levels above
+# src/core/, since this module is at src/core/config.py). Without this,
+# sqlite writes depend on process CWD and split the DB across multiple
+# files when the server and CLI are launched from different dirs.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _anchored(raw: str) -> Path:

@@ -9,15 +9,12 @@ architecture).
 from __future__ import annotations
 
 import threading
-import time
 from datetime import datetime
 from typing import Optional
 
-import config
-from commands import ChatContext
+from core import config
+from core.logging_setup import get_logger
 from empathy.post_exchange import bookkeep
-from logging_setup import get_logger
-from prompt_stack import replace_system_block
 from prompts import (
     FACTS_TAG,
     LEMON_PROMPT,
@@ -27,7 +24,10 @@ from prompts import (
     format_user_facts,
     get_time_context,
 )
+from prompts.prompt_stack import replace_system_block
 from storage import db
+
+from .commands import ChatContext
 
 log = get_logger("session_context")
 
@@ -80,7 +80,6 @@ def run_bookkeeping(
     With stages 2+3, lemon-state updates moved pre-reply (via the merged
     user_read pass), so this thread no longer touches state — only facts.
     """
-    started = time.time()
     try:
         existing = db.get_facts()
         if config.ENABLE_AUTO_FACTS:
@@ -95,15 +94,13 @@ def run_bookkeeping(
         else:
             new_facts = {}
 
-        upserted = 0
+        # The `bookkeep` line in post_exchange already covers the LLM call's
+        # outcome (ms + fact count). Persisting via upsert_fact has its own
+        # `fact_upsert` log line per fact. So this thread is silent on success;
+        # only log on failure.
         with lock:
             for k, v in list(new_facts.items())[:config.AUTO_FACTS_MAX_PER_TURN]:
                 db.upsert_fact(k, v, source_session_id=session_id)
-                upserted += 1
             trace.facts_extracted = new_facts
-        log.info(
-            "bookkeep_done upserted=%d elapsed_ms=%d",
-            upserted, int((time.time() - started) * 1000),
-        )
     except Exception as e:
         log.error("bookkeep_failed error=%r", e)

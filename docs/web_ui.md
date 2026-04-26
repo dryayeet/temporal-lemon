@@ -5,9 +5,9 @@
 ## Run
 
 ```bash
-python src/web.py
+PYTHONPATH=src python -m app.web
 # or
-uvicorn web:app --reload --app-dir src
+uvicorn app.web:app --reload --app-dir src
 ```
 
 Then open `http://127.0.0.1:8000`.

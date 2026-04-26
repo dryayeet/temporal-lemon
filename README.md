@@ -39,14 +39,20 @@ Optional overrides (also via env var):
 
 CLI:
 ```bash
-python src/lem.py
+python -m app.lem               # from src/, or with PYTHONPATH=src
+# or:
+PYTHONPATH=src python -m app.lem
 ```
 
 Web UI:
 ```bash
-python src/web.py
+python -m app.web               # from src/
+# or with uvicorn directly:
+uvicorn app.web:app --reload --app-dir src
 # then visit http://127.0.0.1:8000
 ```
+
+`pytest.ini` puts `src/` on the import path for the test suite, so tests import the new packages (`app`, `core`, `prompts`, etc.) directly.
 
 ## HTTP API
 
@@ -125,16 +131,22 @@ pytest
 
 ```
 src/
-  config.py              env, models, knobs, paths, HTTP headers
-  pipeline.py            orchestrates read_user (4 sub-objects) → memory → draft → check → regen-once
-  session_context.py     shared CLI+web helpers: initial history, refresh blocks, bg fact bookkeeping
-  commands.py            slash-command registry + dispatcher; ChatContext (history, lemon_state, user_state)
-  lem.py                 CLI entry point
-  web.py                 FastAPI app (chat, commands, introspection, /state, /user_state, /trace)
+  app/                   entry points + per-turn orchestration
+    lem.py               CLI entry point (python -m app.lem)
+    web.py               FastAPI app (chat, commands, introspection, /state, /user_state, /trace)
+    pipeline.py          orchestrates read_user (4 sub-objects) → memory → draft → check → regen-once
+    session_context.py   shared CLI+web helpers: initial history, refresh blocks, bg fact bookkeeping
+    commands.py          slash-command registry + dispatcher; ChatContext (history, lemon_state, user_state)
 
-  prompts.py             single source of truth for every prompt + every block formatter
-  persona.py             LEMON_TRAITS (Big 5) + LEMON_ADAPTATIONS (goals/values/concerns/stance)
-  prompt_stack.py        replace_system_block + compress_history
+  core/                  cross-cutting infrastructure
+    config.py            env, models, knobs, paths, HTTP headers
+    logging_setup.py     `lemon.*` logger tree, payload-safe formatters
+
+  prompts/               every prompt + every block formatter
+    __init__.py          format_lemon_state, format_user_state_block, format_reading_block, build_user_read_prompt, build_bookkeep_prompt, etc.
+    persona.py           LEMON_TRAITS (Big 5) + LEMON_ADAPTATIONS (goals/values/concerns/stance)
+    prompt_stack.py      replace_system_block + compress_history
+    schwartz.py          Schwartz's 10 universal values + alias coercion + entry normalizer
 
   empathy/               the empathy pipeline's specialised building blocks
     emotion.py           23-label emotion schema, family map, validator
@@ -155,10 +167,10 @@ src/
     user_state.py        user's three-layer state: defaults, load/save, validator, apply_delta
     state.py             DEPRECATED legacy 6-field shim (kept for migration path)
 
-  templates/
-    index.html           single-page web UI (sidebar shows lemon + user state separately)
-  static/
-    lemon.png            favicon and on-page logo
+  temporal/              time-context helpers (humanize_age, time_of_day, session_duration)
+
+  templates/             single-page web UI (index.html)
+  static/                brand asset (lemon.png)
 
 tests/                   pytest suite
 docs/                    architecture, dyadic_state, memory_architecture, slash_commands, db_schema, web_ui, empathy_research, TECHNICAL, BENCHMARKING

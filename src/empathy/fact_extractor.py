@@ -17,7 +17,7 @@ import re
 from typing import Iterable, Optional
 
 from llm.parse_utils import strip_json_fences
-from logging_setup import get_logger
+from core.logging_setup import get_logger
 
 log = get_logger("empathy.fact_extractor")
 

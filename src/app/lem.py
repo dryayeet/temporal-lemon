@@ -1,4 +1,7 @@
-"""Lemon CLI entry point: REPL with empathy pipeline, slash commands, SQLite memory."""
+"""Lemon CLI entry point: REPL with empathy pipeline, slash commands, SQLite memory.
+
+Run as `python -m app.lem` from src/ (or with PYTHONPATH=src).
+"""
 import random
 import threading
 from datetime import datetime
@@ -6,16 +9,17 @@ from typing import Optional
 
 import requests
 
-import config
-from commands import ChatContext, dispatch, is_command
-from config import CHAT_MODEL, KEEP_RECENT_TURNS
-from logging_setup import get_logger, setup_logging
-from pipeline import recent_messages_for_context, run_empathy_turn
+from core import config
+from core.config import CHAT_MODEL, KEEP_RECENT_TURNS
+from core.logging_setup import get_logger, setup_logging
 from prompts import LEMON_OPENERS
-from session_context import initial_history, refresh_base_blocks, run_bookkeeping
 from storage import db
 from storage.lemon_state import fresh_lemon_session_state, save_lemon_state
 from storage.user_state import fresh_user_session_state
+
+from .commands import ChatContext, dispatch, is_command
+from .pipeline import recent_messages_for_context, run_empathy_turn
+from .session_context import initial_history, refresh_base_blocks, run_bookkeeping
 
 
 def main() -> None:

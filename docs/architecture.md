@@ -6,32 +6,40 @@ Lemon's design centers on one idea: a chatbot that *behaves* like a friend inste
 
 ```
                        ┌──────────────────────────────────────────┐
-                       │                 config.py                │
+                       │           core/config + logging         │
                        │     env, models, paths, knobs, HTTP      │
                        └──────────────────────────────────────────┘
                                            │
    ┌─────────────┬───────────────┬─────────┼─────────┬───────────────┬──────────────┐
    ▼             ▼               ▼         ▼         ▼               ▼              ▼
-prompts.py    empathy/          llm/              storage/       session_        pipeline.py
-persona.py    (emotion,        (chat,             (db, memory,   context.py     (orchestrator:
-              tom, check,      parse_utils)       lemon_state,   (initial       read_user →
-              user_read,                          user_state,    history,       memory → draft
-              post_exchange,                      state-shim)    refresh,       → check → regen)
-              fact_extractor)                                    bookkeeping)
+prompts/      empathy/          llm/              storage/         app/             app/
+(persona,     (emotion,        (chat,             (db, memory,    session_         pipeline.py
+ prompt_      tom, check,       parse_utils)       lemon_state,    context.py      (orchestrator:
+ stack,       user_read,                           user_state,    (initial         read_user →
+ schwartz,    post_exchange,                       state-shim)     history,        memory → draft
+ blocks)      fact_extractor)                                      refresh,        → check → regen)
+                                                                   bookkeeping)
                                                                       │
                                                                       ▼
-                                                              lem.py / web.py
-                                                           + commands.py (slash)
+                                                              app/lem.py / app/web.py
+                                                           + app/commands.py (slash)
 ```
 
-`persona.py` exports `LEMON_TRAITS` (Big 5) and `LEMON_ADAPTATIONS` (goals
-/ values / concerns / stance) — the static seeds of lemon's three-layer
-state. `schwartz.py` defines the 10 Schwartz universal values that tag
-every entry in the `values` slot of `adaptations`. `storage/lemon_state.py`
-and `storage/user_state.py` hold the runtime three-layer schema for both
-agents. The legacy `storage/state.py` remains as a deprecated shim for
-the legacy migration path. See `docs/dyadic_state.md` for the full
-schema and rationale.
+After the 2026-04-27 reorganization, every Python file in `src/` lives in
+a package folder: `app/` (entry points + orchestration), `core/`
+(config + logging), `prompts/` (every prompt + block formatter, with
+`prompts/__init__.py` as the canonical module), plus the existing
+`empathy/`, `llm/`, `storage/`, `temporal/`, and the asset folders
+`templates/` + `static/`.
+
+`prompts/persona.py` exports `LEMON_TRAITS` (Big 5) and `LEMON_ADAPTATIONS`
+(goals / Schwartz-tagged values / concerns / stance) — the static seeds
+of lemon's three-layer state. `prompts/schwartz.py` defines the 10
+Schwartz universal values that tag every entry in the `values` slot of
+`adaptations`. `storage/lemon_state.py` and `storage/user_state.py` hold
+the runtime three-layer schema for both agents. The legacy
+`storage/state.py` remains as a deprecated shim for the legacy migration
+path. See `docs/dyadic_state.md` for the full schema and rationale.
 
 Two entry points, one core:
 

@@ -14,8 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Optional
 
-import config
-from logging_setup import get_logger
+from core import config
+from core.logging_setup import get_logger
 
 log = get_logger("storage.db")
 
@@ -262,7 +262,9 @@ def log_message(
             (session_id, role, content, _now(), emotion, intensity, salience),
         )
         mid = cur.lastrowid
-        log.info(
+        # Demoted to debug: fires twice per turn (user + assistant) and the
+        # bodies are visible via /history. The turn_done line covers count.
+        log.debug(
             "msg_insert id=%s role=%s chars=%d emotion=%s",
             mid, role, len(content), emotion,
         )
@@ -385,10 +387,8 @@ def save_state_snapshot(state: dict, session_id: Optional[int] = None,
             "VALUES (?, ?, ?)",
             (session_id, _now(), json.dumps(state)),
         )
-        log.info(
-            "state_save mood=%s disposition=%s",
-            state.get("mood"), state.get("disposition"),
-        )
+        # Legacy table — only the migration shim writes here. Debug only.
+        log.debug("state_save mood=%s", state.get("mood"))
 
 
 # ---------- user-state snapshots (dyadic-state stage 1) ----------
@@ -404,7 +404,12 @@ def latest_user_state(path: Optional[Path] = None) -> Optional[dict]:
 
 def save_user_state_snapshot(state: dict, session_id: Optional[int] = None,
                              path: Optional[Path] = None) -> None:
-    """Append a user_state snapshot. Trajectory-preserving (no UPDATE)."""
+    """Append a user_state snapshot. Trajectory-preserving (no UPDATE).
+
+    Logged at DEBUG: this fires every turn and the same info is already in
+    the per-turn `read` line + the /state HTTP endpoint. Surfacing it at
+    INFO would double the per-turn log volume for no extra signal.
+    """
     with connect(path) as c:
         c.execute(
             "INSERT INTO user_state_snapshots (session_id, created_at, state_json) "
@@ -412,13 +417,7 @@ def save_user_state_snapshot(state: dict, session_id: Optional[int] = None,
             (session_id, _now(), json.dumps(state)),
         )
         s = (state or {}).get("state") or {}
-        log.info(
-            "user_state_save mood=%s pad=(%.2f,%.2f,%.2f)",
-            s.get("mood_label"),
-            float(s.get("pleasure", 0.0)),
-            float(s.get("arousal", 0.0)),
-            float(s.get("dominance", 0.0)),
-        )
+        log.debug("user_state_save mood=%s", s.get("mood_label"))
 
 
 # ---------- lemon-state snapshots (dyadic-state stage 3) ----------
@@ -434,7 +433,10 @@ def latest_lemon_state(path: Optional[Path] = None) -> Optional[dict]:
 
 def save_lemon_state_snapshot(state: dict, session_id: Optional[int] = None,
                               path: Optional[Path] = None) -> None:
-    """Append a lemon_state snapshot. Trajectory-preserving (no UPDATE)."""
+    """Append a lemon_state snapshot. Trajectory-preserving (no UPDATE).
+
+    Logged at DEBUG; same reasoning as `save_user_state_snapshot`.
+    """
     with connect(path) as c:
         c.execute(
             "INSERT INTO lemon_state_snapshots (session_id, created_at, state_json) "
@@ -442,13 +444,7 @@ def save_lemon_state_snapshot(state: dict, session_id: Optional[int] = None,
             (session_id, _now(), json.dumps(state)),
         )
         s = (state or {}).get("state") or {}
-        log.info(
-            "lemon_state_save mood=%s pad=(%.2f,%.2f,%.2f)",
-            s.get("mood_label"),
-            float(s.get("pleasure", 0.0)),
-            float(s.get("arousal", 0.0)),
-            float(s.get("dominance", 0.0)),
-        )
+        log.debug("lemon_state_save mood=%s", s.get("mood_label"))
 
 
 # ---------- facts ----------

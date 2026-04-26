@@ -36,9 +36,9 @@ import math
 import re
 from typing import Optional
 
-import config
+from core import config
 from empathy.emotion import emotion_relatedness
-from logging_setup import get_logger, preview
+from core.logging_setup import get_logger, preview
 from storage import db
 from temporal.decay import recency_decay
 
@@ -196,7 +196,8 @@ def relevant_memories(
         )
 
     if not candidates:
-        log.info("memory_empty emotion=%s", emotion)
+        # The `remember ms=X hits=0` line in the pipeline covers this case.
+        log.debug("memory_empty emotion=%s", emotion)
         return []
 
     # 2. Normalize BM25 scores within the pool. Fallback path has no BM25 →
@@ -229,7 +230,9 @@ def relevant_memories(
     scored.sort(key=lambda r: r["score"], reverse=True)
     top = scored[:limit]
 
-    log.info(
+    # The pipeline's `remember ms=X hits=N` line covers the per-turn return.
+    # Per-pick info stays at debug.
+    log.debug(
         "memory candidates=%d returned=%d fallback=%s",
         len(candidates), len(top), used_fallback,
     )

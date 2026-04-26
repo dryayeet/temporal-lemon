@@ -15,10 +15,10 @@ from typing import Optional
 
 import requests
 
-from config import OPENROUTER_HEADERS, OPENROUTER_URL, STATE_MODEL
+from core.config import OPENROUTER_HEADERS, OPENROUTER_URL, STATE_MODEL
+from core.logging_setup import get_logger, preview, shape_of
 from empathy.fact_extractor import _validate as _validate_facts
 from llm.parse_utils import strip_json_fences
-from logging_setup import get_logger, preview, shape_of
 from prompts import build_bookkeep_prompt
 
 log = get_logger("empathy.post_exchange")
@@ -78,10 +78,7 @@ def bookkeep(
             if facts_sub else {}
         )
 
-        log.info(
-            "bookkeep elapsed_ms=%d new_facts=%d",
-            elapsed_ms, len(new_facts),
-        )
+        log.info("bookkeep ms=%d facts=%d", elapsed_ms, len(new_facts))
         log.debug("bookkeep_detail facts=%s", new_facts)
         return new_facts
 

@@ -1,5 +1,5 @@
 """Tests for the Schwartz universal-values vocabulary + helpers."""
-from schwartz import (
+from prompts.schwartz import (
     SCHWARTZ_DESCRIPTIONS,
     SCHWARTZ_VALUES,
     coerce_schwartz,

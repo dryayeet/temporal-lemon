@@ -28,9 +28,10 @@ from datetime import datetime
 from typing import Mapping, Optional
 
 from llm.parse_utils import format_recent_for_prompt
-from schwartz import SCHWARTZ_DESCRIPTIONS, SCHWARTZ_VALUES
 from temporal.age import humanize_age
 from temporal.clock import session_duration_note, time_of_day_label
+
+from .schwartz import SCHWARTZ_DESCRIPTIONS, SCHWARTZ_VALUES
 
 
 def _render_value(entry) -> str:

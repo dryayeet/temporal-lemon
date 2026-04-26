@@ -5,9 +5,9 @@ from typing import Iterable, Iterator, Optional
 
 import requests
 
-import config
-from config import OPENROUTER_HEADERS, OPENROUTER_URL
-from logging_setup import get_logger
+from core import config
+from core.config import OPENROUTER_HEADERS, OPENROUTER_URL
+from core.logging_setup import get_logger
 from prompts import PERSONA_TAG  # marks the persona system block as cacheable
 
 log = get_logger("llm.chat")
@@ -76,10 +76,7 @@ def iter_chat(history: list[dict], model: Optional[str] = None) -> Iterator[str]
         "stream": True,
     }
 
-    log.info(
-        "chat_request model=%s %s",
-        payload["model"], _summarize_history(wire_messages),
-    )
+    log.debug("chat_request model=%s %s", payload["model"], _summarize_history(wire_messages))
     log.debug("chat_request_body payload=%s", json.dumps(payload)[:4000])
 
     started = time.time()
@@ -110,10 +107,7 @@ def iter_chat(history: list[dict], model: Optional[str] = None) -> Iterator[str]
         finally:
             elapsed_ms = int((time.time() - started) * 1000)
             full = "".join(chunks)
-            log.info(
-                "chat_response chars=%d elapsed_ms=%d",
-                len(full), elapsed_ms,
-            )
+            log.debug("chat_response chars=%d ms=%d", len(full), elapsed_ms)
             log.debug("chat_response_full content=%s", full)
 
 

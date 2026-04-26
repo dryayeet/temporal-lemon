@@ -31,8 +31,8 @@ import copy
 from typing import Optional
 
 from llm.parse_utils import strip_json_fences  # noqa: F401  (kept for parity / future use)
-from logging_setup import get_logger
-from schwartz import normalize_value_entry
+from core.logging_setup import get_logger
+from prompts.schwartz import normalize_value_entry
 from storage.db import latest_user_state, save_user_state_snapshot
 
 log = get_logger("storage.user_state")

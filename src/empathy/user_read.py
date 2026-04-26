@@ -17,11 +17,11 @@ from typing import Optional
 
 import requests
 
-from config import OPENROUTER_HEADERS, OPENROUTER_URL, STATE_MODEL
+from core.config import OPENROUTER_HEADERS, OPENROUTER_URL, STATE_MODEL
+from core.logging_setup import get_logger, preview, shape_of
 from empathy.emotion import DEFAULT_EMOTION, _validate as _validate_emotion
 from empathy.tom import DEFAULT_TOM, _validate as _validate_tom
 from llm.parse_utils import strip_json_fences
-from logging_setup import get_logger, preview, shape_of
 from prompts import build_user_read_prompt
 from storage.user_state import validate_delta as _validate_state_delta
 
@@ -113,17 +113,11 @@ def read_user(
         user_delta = _validate_state_delta(user_delta_sub)
         lemon_delta = _clamp_lemon_delta(_validate_state_delta(lemon_delta_sub))
 
-        upad = user_delta.get("pad") or {}
-        lpad = lemon_delta.get("pad") or {}
         log.info(
-            "user_read elapsed_ms=%d emotion=%s intensity=%.2f "
-            "user_mood=%s u_pad=(%+0.2f,%+0.2f,%+0.2f) "
-            "lemon_mood=%s l_pad=(%+0.2f,%+0.2f,%+0.2f)",
+            "read ms=%d emo=%s i=%.2f user=%s lemon=%s",
             elapsed_ms, emotion.get("primary"), emotion.get("intensity") or 0.0,
             user_delta.get("mood_label") or "-",
-            float(upad.get("pleasure", 0.0)), float(upad.get("arousal", 0.0)), float(upad.get("dominance", 0.0)),
             lemon_delta.get("mood_label") or "-",
-            float(lpad.get("pleasure", 0.0)), float(lpad.get("arousal", 0.0)), float(lpad.get("dominance", 0.0)),
         )
         return emotion, tom, user_delta, lemon_delta
 
