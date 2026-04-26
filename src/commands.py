@@ -12,18 +12,21 @@ from typing import Callable, Optional
 
 import config
 from storage import db
-from storage import state as state_mod
+from storage import lemon_state as lemon_state_mod
 
 
 @dataclass
 class ChatContext:
     """Mutable state shared with the slash-command handlers."""
     history: list[dict] = field(default_factory=list)
-    internal_state: dict = field(default_factory=dict)
     chat_model: str = ""
     session_id: Optional[int] = None
     exit_requested: bool = False
     last_trace: Optional[object] = None   # most recent PipelineTrace, for /why
+    # Dyadic-state: both agents have a three-layer tonic state object. Updated
+    # each turn from trace.{user,lemon}_state_after by the pipeline.
+    user_state: dict = field(default_factory=dict)
+    lemon_state: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -72,16 +75,62 @@ def _help(ctx: ChatContext, args: str) -> CommandResult:
     return CommandResult("\n".join(lines))
 
 
-@command("state", "show lemon's current internal state")
+@command("state", "show lemon's current internal state (traits / adaptations / PAD)")
 def _state(ctx: ChatContext, args: str) -> CommandResult:
-    return CommandResult(json.dumps(ctx.internal_state, indent=2))
+    if not ctx.lemon_state:
+        return CommandResult("(no lemon_state yet)")
+    s = ctx.lemon_state.get("state", {})
+    traits = ctx.lemon_state.get("traits", {})
+    adapt = ctx.lemon_state.get("adaptations", {})
+    lines = [
+        "lemon_state:",
+        f"  mood: {s.get('mood_label', 'neutral')}",
+        f"  PAD: pleasure {float(s.get('pleasure', 0.0)):+.2f}, "
+        f"arousal {float(s.get('arousal', 0.0)):+.2f}, "
+        f"dominance {float(s.get('dominance', 0.0)):+.2f}",
+        "  traits:",
+    ]
+    for k in ("openness", "conscientiousness", "extraversion", "agreeableness", "neuroticism"):
+        lines.append(f"    {k:<18} {float(traits.get(k, 0.0)):+.2f}")
+    lines.append("  adaptations:")
+    lines.append(f"    goals:    {', '.join(adapt.get('current_goals') or []) or '(none)'}")
+    lines.append(f"    values:   {', '.join(adapt.get('values') or []) or '(none)'}")
+    lines.append(f"    concerns: {', '.join(adapt.get('concerns') or []) or '(none)'}")
+    lines.append(f"    stance:   {adapt.get('relational_stance') or '(none)'}")
+    return CommandResult("\n".join(lines))
 
 
-@command("reset", "reset internal state to defaults (does not erase facts or history)")
+@command("user_state", "show the user's inferred persistent state (traits / adaptations / PAD)")
+def _user_state(ctx: ChatContext, args: str) -> CommandResult:
+    if not ctx.user_state:
+        return CommandResult("(no user_state yet — first read of this person)")
+    s = ctx.user_state.get("state", {})
+    traits = ctx.user_state.get("traits", {})
+    adapt = ctx.user_state.get("adaptations", {})
+    lines = [
+        "user_state:",
+        f"  mood: {s.get('mood_label', 'neutral')}",
+        f"  PAD: pleasure {float(s.get('pleasure', 0.0)):+.2f}, "
+        f"arousal {float(s.get('arousal', 0.0)):+.2f}, "
+        f"dominance {float(s.get('dominance', 0.0)):+.2f}",
+        "  traits:",
+    ]
+    for k in ("openness", "conscientiousness", "extraversion", "agreeableness", "neuroticism"):
+        lines.append(f"    {k:<18} {float(traits.get(k, 0.0)):+.2f}")
+    lines.append("  adaptations:")
+    lines.append(f"    goals:    {', '.join(adapt.get('current_goals') or []) or '(none)'}")
+    lines.append(f"    values:   {', '.join(adapt.get('values') or []) or '(none)'}")
+    lines.append(f"    concerns: {', '.join(adapt.get('concerns') or []) or '(none)'}")
+    lines.append(f"    stance:   {adapt.get('relational_stance') or '(none)'}")
+    return CommandResult("\n".join(lines))
+
+
+@command("reset", "reset lemon's state to persona defaults (does not erase facts or history)")
 def _reset(ctx: ChatContext, args: str) -> CommandResult:
-    ctx.internal_state = dict(state_mod.DEFAULT_STATE)
-    state_mod.save_state(ctx.internal_state, session_id=ctx.session_id)
-    return CommandResult("internal state reset to defaults.", reload_state=True)
+    import copy
+    ctx.lemon_state = copy.deepcopy(lemon_state_mod.DEFAULT_LEMON_STATE)
+    lemon_state_mod.save_lemon_state(ctx.lemon_state, session_id=ctx.session_id)
+    return CommandResult("lemon's state reset to persona defaults.", reload_state=True)
 
 
 @command("facts", "list everything lemon remembers about you")
@@ -196,6 +245,46 @@ def _why(ctx: ChatContext, args: str) -> CommandResult:
 
     memories = getattr(trace, "memories", []) or []
     lines.append(f"  memories used: {len(memories)}")
+
+    # Dyadic-state: surface trajectory for both agents.
+    def _summarize_trajectory(label: str, before, after, delta):
+        if before is None or after is None:
+            return
+        before_mood = before.get("state", {}).get("mood_label", "?")
+        after_mood = after.get("state", {}).get("mood_label", "?")
+        if before_mood != after_mood:
+            lines.append(f"  {label} mood: {before_mood} -> {after_mood}")
+        else:
+            lines.append(f"  {label} mood: {after_mood}")
+        if not delta:
+            return
+        pad = delta.get("pad") or {}
+        nudges = []
+        for k in ("pleasure", "arousal", "dominance"):
+            v = float(pad.get(k, 0.0))
+            if abs(v) > 0.005:
+                nudges.append(f"{k[0]}{v:+.2f}")
+        if nudges:
+            lines.append(f"    PAD nudge: {' '.join(nudges)}")
+        adds = (delta.get("goal_add") or []) + (delta.get("concern_add") or [])
+        if adds:
+            lines.append(f"    added: {', '.join(adds)}")
+        removes = (delta.get("goal_remove") or []) + (delta.get("concern_remove") or [])
+        if removes:
+            lines.append(f"    resolved: {', '.join(removes)}")
+
+    _summarize_trajectory(
+        "user",
+        getattr(trace, "user_state_before", None),
+        getattr(trace, "user_state_after", None),
+        getattr(trace, "user_state_delta", None),
+    )
+    _summarize_trajectory(
+        "lemon",
+        getattr(trace, "lemon_state_before", None),
+        getattr(trace, "lemon_state_after", None),
+        getattr(trace, "lemon_state_delta", None),
+    )
 
     check = getattr(trace, "check", None)
     if check is not None:

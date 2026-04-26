@@ -1,6 +1,8 @@
 # Memory architecture
 
-> Status: live as of 2026-04-26. Replaces the old emotion-only filter retrieval.
+> Status: live as of 2026-04-27. Tier 2 (composite scoring) shipped 2026-04-26;
+> facts moved to a facts-only post-exchange call as part of the dyadic-state
+> stage 2 work on 2026-04-27.
 
 This doc covers how lemon remembers things — what's persisted, what's
 surfaced into each turn's prompt, and how retrieval is scored. There are
@@ -12,11 +14,25 @@ Tier 2 — episodic memories         ↓ scored, top-K per turn
 Tier 3 — working history           ↓ recent verbatim + folded summary
 ```
 
+The tonic state for both lemon and the user (the three-layer Big 5 +
+adaptations + PAD object covered in `docs/dyadic_state.md`) sits *alongside*
+this memory architecture, not inside it. Persistent state and persistent
+memories are different objects with different update sites:
+
+- **State**: nudged pre-reply by the merged user_read pass, persisted in
+  `lemon_state_snapshots` and `user_state_snapshots`.
+- **Facts**: extracted post-reply by `bookkeep` (now facts-only), persisted
+  in the `facts` table.
+- **Episodic memories**: every user message gets a phasic emotion tag at log
+  time; the FTS5+composite retriever pulls from the `messages` table.
+
 ## Tier 1 — Facts (always-on, no retrieval)
 
 Durable key/value bookkeeping. Names, ongoing situations, stable preferences,
 relationships. Updated by the post-reply `bookkeep` LLM call
-(`empathy/post_exchange.py`). Stored in the SQLite `facts` table.
+(`empathy/post_exchange.py`) — which is now facts-only after stage 2 of the
+dyadic-state work moved the state nudge pre-reply. Stored in the SQLite
+`facts` table.
 
 Every turn dumps **all** facts into the system stack as the `<user_facts>`
 block (`prompts.format_user_facts`, refreshed by `session_context.refresh_base_blocks`).

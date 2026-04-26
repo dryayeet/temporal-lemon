@@ -35,7 +35,8 @@ from pipeline import recent_messages_for_context, run_empathy_turn
 from prompts import LEMON_OPENERS
 from session_context import initial_history, refresh_base_blocks, run_bookkeeping
 from storage import db
-from storage.state import fresh_session_state, save_state
+from storage.lemon_state import fresh_lemon_session_state, save_lemon_state
+from storage.user_state import fresh_user_session_state
 
 # Logging must be configured before any module-level code that may emit logs.
 setup_logging()
@@ -104,14 +105,16 @@ async def log_requests(request: Request, call_next: Any) -> Any:
 _lock = Lock()
 _session_start = datetime.now()
 _session_id = db.start_session()
-_internal_state = fresh_session_state()
-save_state(_internal_state, session_id=_session_id)
+_lemon_state = fresh_lemon_session_state()
+save_lemon_state(_lemon_state, session_id=_session_id)
+_user_state = fresh_user_session_state()
 
 _ctx = ChatContext(
-    history=initial_history(_internal_state, _session_start),
-    internal_state=_internal_state,
+    history=initial_history(_lemon_state, _session_start),
+    lemon_state=_lemon_state,
     chat_model=CHAT_MODEL,
     session_id=_session_id,
+    user_state=_user_state,
 )
 
 # greet on startup so the UI has something to render on first paint
@@ -249,8 +252,10 @@ def _stream_reply(user_msg: str) -> Iterator[bytes]:
         phase_queue.append(phase)
 
     with _lock:
-        base_history = refresh_base_blocks(_ctx.history, _ctx.internal_state, _session_start)
+        base_history = refresh_base_blocks(_ctx.history, _ctx.lemon_state, _session_start)
         model = _ctx.chat_model
+        user_state_in = dict(_ctx.user_state) if _ctx.user_state else None
+        lemon_state_in = dict(_ctx.lemon_state) if _ctx.lemon_state else None
 
     try:
         # yield the first phase immediately so the UI has something to render
@@ -267,6 +272,8 @@ def _stream_reply(user_msg: str) -> Iterator[bytes]:
             session_id=_session_id,
             keep_recent_turns=KEEP_RECENT_TURNS,
             on_phase=push_phase,
+            user_state=user_state_in,
+            lemon_state=lemon_state_in,
         )
 
         for phase in phase_queue:
@@ -284,10 +291,15 @@ def _stream_reply(user_msg: str) -> Iterator[bytes]:
         _ctx.last_trace = trace
         _ctx.history.append({"role": "user", "content": user_msg})
         _ctx.history.append({"role": "assistant", "content": reply})
-        # snapshot inputs the bookkeeping thread will need; take them now while
-        # we hold the lock so they stay consistent with the history we just appended.
+        # Pull both freshly-updated tonic states off the trace; pipeline
+        # already persisted them. Next turn reads from these values.
+        if getattr(trace, "user_state_after", None) is not None:
+            _ctx.user_state = trace.user_state_after
+        if getattr(trace, "lemon_state_after", None) is not None:
+            _ctx.lemon_state = trace.lemon_state_after
+        # Snapshot inputs the bookkeeping thread will need (facts-only now,
+        # so just recent_msgs and the model name).
         recent_snapshot = recent_messages_for_context(_ctx.history)
-        state_snapshot = dict(_ctx.internal_state)
         model_snapshot = _ctx.chat_model
 
     yield _sse("token", reply)
@@ -297,7 +309,7 @@ def _stream_reply(user_msg: str) -> Iterator[bytes]:
         target=run_bookkeeping,
         args=(
             _ctx, _session_id, user_msg, reply, trace,
-            recent_snapshot, state_snapshot, model_snapshot, _lock,
+            recent_snapshot, model_snapshot, _lock,
         ),
         daemon=True,
     ).start()
@@ -333,11 +345,31 @@ def command(req: CommandRequest) -> JSONResponse:
 @app.get(
     "/state",
     tags=["introspection"],
-    summary="Lemon's current internal state",
-    description="The 6-field internal state dict (mood, energy, engagement, emotional_thread, recent_activity, disposition).",
+    summary="Lemon's current internal state (three-layer schema)",
+    description=(
+        "Lemon's three-layer tonic state: traits (Big 5), characteristic "
+        "adaptations (goals/values/concerns/stance), and PAD core affect "
+        "(pleasure / arousal / dominance plus a derived mood label). Updated "
+        "each turn from the empathy pipeline's lemon_state delta."
+    ),
 )
 def get_state() -> JSONResponse:
-    return JSONResponse(_ctx.internal_state)
+    return JSONResponse(_ctx.lemon_state or {})
+
+
+@app.get(
+    "/user_state",
+    tags=["introspection"],
+    summary="The user's inferred persistent state (dyadic-state stage 1)",
+    description=(
+        "The three-layer user state: traits (Big 5), characteristic adaptations "
+        "(goals/values/concerns/stance), and PAD core affect (pleasure / arousal "
+        "/ dominance plus a derived mood label). Updated each turn from the "
+        "empathy pipeline's user_state delta."
+    ),
+)
+def get_user_state() -> JSONResponse:
+    return JSONResponse(_ctx.user_state or {})
 
 
 @app.get(

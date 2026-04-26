@@ -54,6 +54,30 @@ CREATE TABLE IF NOT EXISTS state_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_state_session ON state_snapshots(session_id);
 
+-- User-side internal-state snapshots (stage 1 of dyadic-state architecture).
+-- Parallel to state_snapshots; separate table keeps trajectory history without
+-- needing a discriminator column on the existing table. See
+-- `docs/dyadic_state.md` and `storage/user_state.py`.
+CREATE TABLE IF NOT EXISTS user_state_snapshots (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
+    created_at   TEXT NOT NULL,
+    state_json   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_user_state_session ON user_state_snapshots(session_id);
+
+-- Lemon-side internal-state snapshots (stage 3 of dyadic-state architecture).
+-- The legacy `state_snapshots` table stays in the schema as archive but gets
+-- no new writes after stage 3. Lemon's runtime state moves to the same
+-- three-layer schema as `user_state`. See `storage/lemon_state.py`.
+CREATE TABLE IF NOT EXISTS lemon_state_snapshots (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
+    created_at   TEXT NOT NULL,
+    state_json   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lemon_state_session ON lemon_state_snapshots(session_id);
+
 CREATE TABLE IF NOT EXISTS facts (
     key          TEXT PRIMARY KEY,
     value        TEXT NOT NULL,
@@ -93,6 +117,27 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
         "ALTER TABLE messages ADD COLUMN emotion TEXT",
         "ALTER TABLE messages ADD COLUMN intensity REAL",
         "ALTER TABLE messages ADD COLUMN salience REAL",
+    ]),
+    (2, [
+        # Stage 1 of dyadic-state: persistent user_state_snapshots table.
+        "CREATE TABLE IF NOT EXISTS user_state_snapshots ("
+        "    id           INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "    session_id   INTEGER REFERENCES sessions(id) ON DELETE SET NULL,"
+        "    created_at   TEXT NOT NULL,"
+        "    state_json   TEXT NOT NULL"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_user_state_session ON user_state_snapshots(session_id)",
+    ]),
+    (3, [
+        # Stage 3 of dyadic-state: lemon_state_snapshots table parallel to
+        # user_state_snapshots. Old state_snapshots stays around as archive.
+        "CREATE TABLE IF NOT EXISTS lemon_state_snapshots ("
+        "    id           INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "    session_id   INTEGER REFERENCES sessions(id) ON DELETE SET NULL,"
+        "    created_at   TEXT NOT NULL,"
+        "    state_json   TEXT NOT NULL"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_lemon_state_session ON lemon_state_snapshots(session_id)",
     ]),
 ]
 
@@ -343,6 +388,66 @@ def save_state_snapshot(state: dict, session_id: Optional[int] = None,
         log.info(
             "state_save mood=%s disposition=%s",
             state.get("mood"), state.get("disposition"),
+        )
+
+
+# ---------- user-state snapshots (dyadic-state stage 1) ----------
+
+def latest_user_state(path: Optional[Path] = None) -> Optional[dict]:
+    """Return the most recent user_state snapshot, or None on a fresh DB."""
+    with connect(path) as c:
+        row = c.execute(
+            "SELECT state_json FROM user_state_snapshots ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return json.loads(row["state_json"]) if row else None
+
+
+def save_user_state_snapshot(state: dict, session_id: Optional[int] = None,
+                             path: Optional[Path] = None) -> None:
+    """Append a user_state snapshot. Trajectory-preserving (no UPDATE)."""
+    with connect(path) as c:
+        c.execute(
+            "INSERT INTO user_state_snapshots (session_id, created_at, state_json) "
+            "VALUES (?, ?, ?)",
+            (session_id, _now(), json.dumps(state)),
+        )
+        s = (state or {}).get("state") or {}
+        log.info(
+            "user_state_save mood=%s pad=(%.2f,%.2f,%.2f)",
+            s.get("mood_label"),
+            float(s.get("pleasure", 0.0)),
+            float(s.get("arousal", 0.0)),
+            float(s.get("dominance", 0.0)),
+        )
+
+
+# ---------- lemon-state snapshots (dyadic-state stage 3) ----------
+
+def latest_lemon_state(path: Optional[Path] = None) -> Optional[dict]:
+    """Return the most recent lemon_state snapshot, or None on a fresh DB."""
+    with connect(path) as c:
+        row = c.execute(
+            "SELECT state_json FROM lemon_state_snapshots ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return json.loads(row["state_json"]) if row else None
+
+
+def save_lemon_state_snapshot(state: dict, session_id: Optional[int] = None,
+                              path: Optional[Path] = None) -> None:
+    """Append a lemon_state snapshot. Trajectory-preserving (no UPDATE)."""
+    with connect(path) as c:
+        c.execute(
+            "INSERT INTO lemon_state_snapshots (session_id, created_at, state_json) "
+            "VALUES (?, ?, ?)",
+            (session_id, _now(), json.dumps(state)),
+        )
+        s = (state or {}).get("state") or {}
+        log.info(
+            "lemon_state_save mood=%s pad=(%.2f,%.2f,%.2f)",
+            s.get("mood_label"),
+            float(s.get("pleasure", 0.0)),
+            float(s.get("arousal", 0.0)),
+            float(s.get("dominance", 0.0)),
         )
 
 
