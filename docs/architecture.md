@@ -12,17 +12,24 @@ Lemon's design centers on one idea: a chatbot that *behaves* like a friend inste
                                            │
    ┌─────────────┬───────────────┬─────────┼─────────┬───────────────┬──────────────┐
    ▼             ▼               ▼         ▼         ▼               ▼              ▼
-prompt/       empathy/          llm/              storage/       session_        pipeline.py
-(persona,     (emotion,        (chat,             (db,           context.py     (orchestrator:
- time,         tom, check,     parse_utils)       memory,        (initial       read_user →
- history,      user_read,                         state)         history,       memory → draft
- facts)        post_exchange,                                    refresh,       → check → regen)
-               fact_extractor)                                   bookkeeping)
+prompts.py    empathy/          llm/              storage/       session_        pipeline.py
+persona.py    (emotion,        (chat,             (db, memory,   context.py     (orchestrator:
+              tom, check,      parse_utils)       lemon_state,   (initial       read_user →
+              user_read,                          user_state,    history,       memory → draft
+              post_exchange,                      state-shim)    refresh,       → check → regen)
+              fact_extractor)                                    bookkeeping)
                                                                       │
                                                                       ▼
                                                               lem.py / web.py
                                                            + commands.py (slash)
 ```
+
+`persona.py` exports `LEMON_TRAITS` (Big 5) and `LEMON_ADAPTATIONS` (goals
+/ values / concerns / stance) — the static seeds of lemon's three-layer
+state. `storage/lemon_state.py` and `storage/user_state.py` hold the
+runtime three-layer schema for both agents. The legacy `storage/state.py`
+remains as a deprecated shim for the legacy migration path. See
+`docs/dyadic_state.md` for the full schema and rationale.
 
 Two entry points, one core:
 
@@ -37,41 +44,51 @@ Two entry points, one core:
 user_msg arrives
   │
   ▼
-[1] merged pre-gen read (Haiku)   →  emotion {primary, intensity, undertones, underlying_need}
-    empathy.user_read.read_user      tom     {feeling, avoid, what_helps}
-  │                                  ↳ one LLM call, two output dicts
+[1] merged pre-gen read (Haiku)   →  emotion           {primary, intensity, undertones, underlying_need}
+    empathy.user_read.read_user      tom               {feeling, avoid, what_helps}
+                                     user_state_delta  PAD nudge + adaptation churn for the user
+                                     lemon_state_delta PAD nudge + adaptation churn for lemon (damped)
+  │                                  ↳ one LLM call, four output dicts
   │                                  ↳ emotion also stored on the message row in db
+  │                                  ↳ both deltas applied + both states persisted before reply
   ▼
-[2] memory retrieval              →  past user messages with same emotion (other sessions)
+[2] memory retrieval              →  past user messages, composite-scored
     storage.memory.relevant_memories   — SQLite only, no LLM
   ▼
-[3] inject system blocks
+[3] inject system blocks (lemon_state, user_state, reading, memory)
   ▼
 [4] main generation (chat model)  →  buffered draft via llm.chat.generate_reply
+                                     reads from BOTH freshly-nudged states
   ▼
 [5] sentiment-mirror check        →  12 regex detectors; pass? regenerate-once with critique?
   ▼
 final reply ships to user (SSE "token" + "done", or CLI print)
   │
   ▼
-[6] backgrounded bookkeeping (Haiku)  →  new_facts + nudged_state, merged into one call
-    empathy.post_exchange.bookkeep      — runs in a daemon thread AFTER the reply is delivered
+[6] backgrounded bookkeeping (Haiku)  →  new_facts only (state nudges happened pre-reply)
+    empathy.post_exchange.bookkeep       — runs in a daemon thread AFTER the reply is delivered
 ```
 
 The message list sent to the chat model:
 
 ```
-0. system: <Who you are>...                        ← persona, ~5KB
-1. system: <time_context>...                       ← refreshed each turn
-2. system: <internal_state>...                     ← refreshed each turn
-3. system: <user_facts>...                         ← refreshed each turn (if any)
-4. system: <emotional_memory>...                   ← from pipeline (if memories found)
-5. system: <user_emotion>...                       ← from pipeline
-6. system: <theory_of_mind>...                     ← from pipeline
-7. system: <earlier_conversation>...               ← from compress_history (optional)
+0. system: <Who you are>...                  ← persona, ~5KB, prompt-cached
+1. system: <time_context>...                 ← refreshed each turn
+2. system: <lemon_state>...                  ← refreshed each turn, then re-overwritten with the post-nudge state
+3. system: <user_facts>...                   ← refreshed each turn (if any)
+4. system: <emotional_memory>...             ← from pipeline (if memories found)
+5. system: <user_state>...                   ← from pipeline (user's tonic state, three-layer)
+6. system: <reading>...                      ← from pipeline (unified phasic emotion + ToM)
+7. system: <earlier_conversation>...         ← from compress_history (optional)
 ... user / assistant / user / ... (last KEEP_RECENT_TURNS)
 N. user: <latest message>
 ```
+
+Tonic-then-phasic ordering for both agents: `<lemon_state>` (lemon's tonic)
+sits at the top; `<user_state>` (user's tonic) and `<reading>` (per-turn
+phasic emotion + ToM) sit per-turn at the bottom. Stage 3 of the dyadic-state
+architecture folded the old `<user_emotion>` and `<theory_of_mind>` blocks
+into `<reading>`.
 
 If `LEMON_PROMPT_CACHE=1` (Anthropic models only) the persona block is wrapped with `cache_control: ephemeral`.
 
@@ -79,34 +96,41 @@ The memory gradient (`prompt_stack.compress_history`) keeps the most recent `KEE
 
 ## State machine
 
-Three pieces of persistent state:
+Four pieces of persistent state, two of them three-layer dyadic objects:
 
-1. **Internal state** — a 6-field dict (mood, energy, engagement, emotional_thread, recent_activity, disposition). Nudged every turn by the merged post-gen `bookkeep` call. Persisted as a snapshot row in `state_snapshots`.
-2. **User facts** — a key/value table (`facts`) for things lemon should remember across sessions. Populated by `/remember` and by `bookkeep`. Loaded as a `<user_facts>` system block each turn.
-3. **Emotion-tagged messages** — every user message gets an `emotion`, `intensity`, `salience` triple from the pre-gen read. Stored on the `messages` row. Used by memory-retrieval to surface past moments that felt similar.
+1. **Lemon state** — a three-layer dict (Big 5 traits + characteristic adaptations + PAD core affect with a derived mood label). Traits hardcoded in `persona.LEMON_TRAITS`; adaptations seeded from `persona.LEMON_ADAPTATIONS`; PAD nudged every turn pre-reply by the merged user_read pass (with asymmetric damping so lemon stays stable). Persisted as a snapshot row in `lemon_state_snapshots`.
+2. **User state** — same shape as lemon. Traits inferred slowly (per-turn nudge cap effectively freezes them in stage 1); adaptations grow as the user shares goals, values, and concerns; PAD updates per turn. Persisted as a snapshot row in `user_state_snapshots`.
+3. **User facts** — a key/value table (`facts`) for things lemon should remember across sessions. Populated by `/remember` and by `bookkeep` (post-reply, facts-only since stage 2). Loaded as a `<user_facts>` system block each turn.
+4. **Emotion-tagged messages** — every user message gets an `emotion`, `intensity`, `salience` triple from the pre-gen read. Stored on the `messages` row. Used by memory-retrieval to surface past moments that felt similar.
+
+The legacy `state_snapshots` table from the pre-stage-3 6-field schema stays as archive; new writes go to the two new tables.
 
 ## Update cadence
 
-| event                       | what runs                                                                       |
-| --------------------------- | ------------------------------------------------------------------------------- |
-| every user message          | empathy pipeline: user_read → retrieve → draft → check → optional retry         |
-| every user message          | refresh `<time_context>` + `<internal_state>` + `<user_facts>` system blocks    |
-| every user message          | log row in `messages` with detected emotion fields                              |
-| every assistant reply       | log row in `messages` (no emotion fields)                                       |
-| every user message          | daemon thread: `post_exchange.bookkeep` → upsert facts + save new state snapshot |
-| session end                 | stamp `ended_at` in `sessions`                                                  |
+| event                       | what runs                                                                                          |
+| --------------------------- | -------------------------------------------------------------------------------------------------- |
+| every user message          | empathy pipeline: user_read → retrieve → draft → check → optional retry                            |
+| every user message          | refresh `<time_context>` + `<lemon_state>` + `<user_facts>` system blocks                          |
+| every user message          | merged user_read pass → emotion + tom + user_state_delta + lemon_state_delta in one LLM call       |
+| every user message          | apply both deltas, persist both via `lemon_state_snapshots` / `user_state_snapshots`               |
+| every user message          | log row in `messages` with detected emotion fields                                                 |
+| every assistant reply       | log row in `messages` (no emotion fields)                                                          |
+| every user message          | daemon thread: `post_exchange.bookkeep` → facts only (state already updated pre-reply)             |
+| session end                 | stamp `ended_at` in `sessions`                                                                     |
 
 ## Cost per turn
 
-| call                         | model                         | runs                     | rough cost |
-| ---------------------------- | ----------------------------- | ------------------------ | ---------- |
-| `user_read` (emotion + ToM)  | `anthropic/claude-haiku-4.5`  | every turn               | ~$0.0002   |
-| main chat                    | `anthropic/claude-haiku-4.5`  | every turn (+1 on retry) | varies; persona cached after turn 1 |
-| `bookkeep` (facts + state)   | `anthropic/claude-haiku-4.5`  | every turn, backgrounded | ~$0.0002   |
+| call                                                       | model                         | runs                     | rough cost |
+| ---------------------------------------------------------- | ----------------------------- | ------------------------ | ---------- |
+| `user_read` (emotion + ToM + user_delta + lemon_delta)     | `anthropic/claude-haiku-4.5`  | every turn               | ~$0.0002–0.0003 |
+| main chat                                                  | `anthropic/claude-haiku-4.5`  | every turn (+1 on retry) | varies; persona cached after turn 1 |
+| `bookkeep` (facts only)                                    | `anthropic/claude-haiku-4.5`  | every turn, backgrounded | ~$0.0001   |
 
 **User-perceived latency = 2 LLM calls.** Total cost = 3 per typical turn.
 
-Disable the empathy pipeline with `LEMON_EMPATHY=0` or `/empathy off` to drop to one user-facing chat call per turn (bookkeep still runs in the background).
+Stage 2 of the dyadic state architecture folded the lemon-side state nudge into the existing user_read call instead of adding a new round trip. The user_read JSON output is longer (4 sub-objects instead of 2) but the call count is unchanged. `bookkeep` got *cheaper* in the same change because its state half is gone.
+
+Disable the empathy pipeline with `LEMON_EMPATHY=0` or `/empathy off` to drop to one user-facing chat call per turn (bookkeep still runs in the background; with the pipeline off, no state nudges happen at all that turn).
 
 ## Why these design choices
 
@@ -114,9 +138,13 @@ Disable the empathy pipeline with `LEMON_EMPATHY=0` or `/empathy off` to drop to
 
 **Buffer, then replay.** The post-check needs the full draft before deciding whether to regenerate. Buffer generation, run the check, then ship the final reply as a single SSE payload. Phase events fill the wait visually.
 
-**Merged classifiers.** The pre-generation read and the post-generation bookkeeping each used to be two separate LLM calls. Now they're one call apiece — both the pre-gen pair and the post-gen pair were hitting the same model with overlapping inputs. Halves the round-trips with negligible quality cost.
+**Merged classifiers.** The pre-generation read used to be two separate calls (emotion + ToM); now it's one call with four sub-objects (emotion + ToM + user_state_delta + lemon_state_delta). Same round-trip count as before, just denser output. The post-generation bookkeeping shrunk from facts+state to facts-only because state moved pre-reply.
 
-**Bookkeep in a daemon thread.** Post-reply work (fact extraction + state nudge) doesn't need to block the user. Fires after `done` is delivered, so user-perceived latency drops by whatever that call costs (~1-2s typical).
+**State first, response second.** Stage 2 of the dyadic state architecture moved both agents' state nudges to *before* the reply (inside the merged user_read pass). The reply call reads from a freshly-updated `<lemon_state>` and `<user_state>`, so reply tone genuinely reflects what lemon "feels" in response to what was just said — instead of the older flow where state caught up after the fact.
+
+**Symmetric schema, asymmetric dynamics.** Both agents use the same three-layer state object, but lemon's PAD nudges are clamped tighter (±0.10 vs ±0.15), her traits and values are persona-fixed and never drift, and her relational stance re-pegs on session start. The user's state has no session-start overrides because realistically a user brings their carried-in mood into the next conversation.
+
+**Bookkeep in a daemon thread.** Post-reply fact extraction doesn't need to block the user. Fires after `done` is delivered, so user-perceived latency drops by whatever that call costs (~1-2s typical).
 
 **Auxiliary calls all on Haiku.** They produce structured JSON, not user-facing text, so a small fast model is appropriate.
 

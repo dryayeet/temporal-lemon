@@ -1,6 +1,6 @@
 # lemon
 
-A chatbot that simulates a friend, not an assistant. Runs on OpenRouter (Claude Haiku 4.5 by default, with Anthropic-style prompt caching on the persona block). Keeps an internal emotional state, runs a per-turn empathy pipeline (merged emotion + theory-of-mind read → memory retrieval → draft → sentiment-mirror check → regenerate-once on failure), and auto-extracts durable facts + nudges its own state in a single post-reply bookkeeping call that runs in the background so the user never waits on it. Everything persists across sessions in SQLite.
+A chatbot that simulates a friend, not an assistant. Runs on OpenRouter (Claude Haiku 4.5 by default, with Anthropic-style prompt caching on the persona block). Models both lemon AND the user with the same three-layer internal state (Big 5 traits + characteristic adaptations + PAD core affect — see [`docs/dyadic_state.md`](docs/dyadic_state.md)). Per-turn empathy pipeline: merged pre-reply read (emotion + theory-of-mind + state nudges for both agents in one LLM call) → memory retrieval → draft → sentiment-mirror check → regenerate-once on failure. Facts auto-extract in a backgrounded post-reply call so the user never waits on bookkeeping. Everything persists across sessions in SQLite.
 
 <p align="center">
   <img src="src/static/lemon.png" alt="lemon" width="200" />
@@ -77,13 +77,14 @@ Once `python src/web.py` is running, the FastAPI app exposes:
 
 **Introspection** (read-only)
 
-| method + path     | tag           | what it returns                                                                          |
-| ----------------- | ------------- | ---------------------------------------------------------------------------------------- |
-| `GET /state`      | introspection | The 6-field internal state dict                                                          |
-| `GET /facts`      | introspection | All stored user facts as a key/value map                                                 |
-| `GET /sessions`   | introspection | The latest 20 sessions (id, started_at, ended_at, msg_count)                             |
-| `GET /history`    | introspection | Current session's user/assistant turns (system blocks excluded)                          |
-| `GET /trace`      | introspection | Last pipeline trace: emotion read, ToM, retrieved memories, empathy-check, facts, regen  |
+| method + path        | tag           | what it returns                                                                                       |
+| -------------------- | ------------- | ----------------------------------------------------------------------------------------------------- |
+| `GET /state`         | introspection | Lemon's three-layer tonic state (traits / adaptations / PAD)                                          |
+| `GET /user_state`    | introspection | The user's inferred three-layer tonic state (same schema)                                             |
+| `GET /facts`         | introspection | All stored user facts as a key/value map                                                              |
+| `GET /sessions`      | introspection | The latest 20 sessions (id, started_at, ended_at, msg_count)                                          |
+| `GET /history`       | introspection | Current session's user/assistant turns (system blocks excluded)                                       |
+| `GET /trace`         | introspection | Last pipeline trace: emotion read, ToM, memories, empathy-check, facts, regen, both state trajectories |
 
 **Static assets**
 
@@ -105,9 +106,11 @@ The server (and CLI) configure a `lemon.*` logger tree at startup. Tune via env:
 
 ## Slash commands
 
-Type `/help` once you're in. Notable additions:
-- `/empathy on|off` — toggle the empathy pipeline live
-- `/why` — show the pipeline trace for the last reply (emotion read, ToM, post-check result)
+Type `/help` once you're in. Notable ones:
+- `/state` / `/user_state` — render either three-layer state object (mood, PAD, traits, adaptations)
+- `/why` — pipeline trace for the last reply (emotion read, ToM, memories, post-check, both state trajectories)
+- `/empathy on|off`, `/autofacts on|off`, `/cache on|off` — runtime toggles
+- `/search`, `/recall`, `/stats`, `/config` — introspection helpers
 
 Full list in [`docs/slash_commands.md`](docs/slash_commands.md).
 
@@ -123,50 +126,54 @@ pytest
 ```
 src/
   config.py              env, models, knobs, paths, HTTP headers
-  pipeline.py            orchestrates read_user → memory → draft → check → regen-once
-  session_context.py     shared CLI+web helpers: initial history, refresh blocks, bg bookkeeping
-  commands.py            slash-command registry + dispatcher
+  pipeline.py            orchestrates read_user (4 sub-objects) → memory → draft → check → regen-once
+  session_context.py     shared CLI+web helpers: initial history, refresh blocks, bg fact bookkeeping
+  commands.py            slash-command registry + dispatcher; ChatContext (history, lemon_state, user_state)
   lem.py                 CLI entry point
-  web.py                 FastAPI app (chat, commands, introspection, /trace)
+  web.py                 FastAPI app (chat, commands, introspection, /state, /user_state, /trace)
 
-  prompt/                system-prompt content lemon reads
-    persona.py           the persona prompt + opener pool
-    time_context.py      time-of-day + session-duration block
-    history.py           memory gradient + system-block swap helper
-    facts.py             <user_facts> system block formatter
+  prompts.py             single source of truth for every prompt + every block formatter
+  persona.py             LEMON_TRAITS (Big 5) + LEMON_ADAPTATIONS (goals/values/concerns/stance)
+  prompt_stack.py        replace_system_block + compress_history
 
   empathy/               the empathy pipeline's specialised building blocks
-    emotion.py           emotion schema, validator, system-block formatter
-    tom.py               theory-of-mind schema, validator, system-block formatter
+    emotion.py           23-label emotion schema, family map, validator
+    tom.py               theory-of-mind schema, validator
     fact_extractor.py    fact-key regex + value-hygiene validator
     empathy_check.py     sentiment-mirror post-check (regex, 12 detectors)
-    user_read.py         merged pre-gen LLM call: emotion + ToM in one round-trip
-    post_exchange.py     merged post-gen LLM call: fact extraction + state nudge
+    user_read.py         merged pre-gen LLM call: emotion + ToM + user_delta + lemon_delta
+    post_exchange.py     post-gen LLM call: facts only (state moved pre-reply in stage 2)
 
   llm/                   raw LLM wire + parsing helpers
     chat.py              OpenRouter reply call: prompt caching + SSE streaming
     parse_utils.py       shared fence-stripper + recent-msgs prompt formatter
 
   storage/               persistence + retrieval
-    db.py                SQLite: sessions, messages (with emotion fields), snapshots, facts
-    memory.py            emotion-tagged message retrieval
-    state.py             internal state: defaults, load/save/format + validator
+    db.py                SQLite: sessions, messages, lemon_state_snapshots, user_state_snapshots, facts
+    memory.py            composite-scored message retrieval (FTS5 + recency + intensity + emotion)
+    lemon_state.py       lemon's three-layer state: defaults, load/save, validator, legacy migrator
+    user_state.py        user's three-layer state: defaults, load/save, validator, apply_delta
+    state.py             DEPRECATED legacy 6-field shim (kept for migration path)
 
   templates/
-    index.html           single-page web UI
+    index.html           single-page web UI (sidebar shows lemon + user state separately)
+  static/
+    lemon.png            favicon and on-page logo
 
-tests/                   pytest suite (most src modules)
-docs/                    architecture, slash commands, db schema, web UI, empathy research
+tests/                   pytest suite
+docs/                    architecture, dyadic_state, memory_architecture, slash_commands, db_schema, web_ui, empathy_research, TECHNICAL, BENCHMARKING
 ```
 
-Per-turn LLM cost: **3 calls** (`user_read` + reply + `post_exchange`), of which only the first two block the user — bookkeeping runs in a daemon thread after the reply ships. Retry on sentiment-mirror failure adds a fourth reply call.
+Per-turn LLM cost: **3 calls** (`user_read` + reply + facts-only `post_exchange`), of which only the first two block the user. Retry on sentiment-mirror failure adds a fourth reply call. Stage 2 of the dyadic-state architecture kept the round-trip count constant by folding the lemon-state nudge into the existing user_read call.
 
 ## Documentation
 
 - [`docs/TECHNICAL.md`](docs/TECHNICAL.md) — full technical reference: every module, every call path, every system block, every knob
-- [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) — how to evaluate lemon: ceiling vs stack-lift tests, EQ-Bench 3 / HEART / CES-LCC recipes, pipeline ON vs OFF
 - [`docs/architecture.md`](docs/architecture.md) — how all the pieces fit, per-turn pipeline diagram
-- [`docs/slash_commands.md`](docs/slash_commands.md) — command reference (`/help`, `/why`, `/empathy`, ...)
+- [`docs/dyadic_state.md`](docs/dyadic_state.md) — three-layer dyadic state design (Big 5 + adaptations + PAD), psychological grounding, schema, migration history
+- [`docs/memory_architecture.md`](docs/memory_architecture.md) — three-tier memory (facts / episodic / working history), composite scoring formula, FTS5 setup
+- [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) — how to evaluate lemon: ceiling vs stack-lift tests, EQ-Bench 3 / HEART / CES-LCC recipes, pipeline ON vs OFF
+- [`docs/slash_commands.md`](docs/slash_commands.md) — command reference (`/help`, `/state`, `/user_state`, `/why`, `/empathy`, ...)
 - [`docs/web_ui.md`](docs/web_ui.md) — endpoints + SSE protocol
 - [`docs/db_schema.md`](docs/db_schema.md) — SQLite tables and access patterns
 - [`docs/empathy_research.md`](docs/empathy_research.md) — survey of algorithmic empathy techniques (the basis of the pipeline)

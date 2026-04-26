@@ -5,8 +5,9 @@ Type any of these in the CLI or web input. Anything starting with `/` is dispatc
 | command                       | what it does                                                          |
 | ----------------------------- | --------------------------------------------------------------------- |
 | `/help`                       | list every command and its summary                                    |
-| `/state`                      | print lemon's current internal state as JSON                          |
-| `/reset`                      | reset internal state to defaults (does not erase facts or history)    |
+| `/state`                      | render lemon's current three-layer state (mood, PAD, traits, adaptations) |
+| `/user_state`                 | render the user's inferred three-layer state                          |
+| `/reset`                      | reset lemon's state to persona defaults (does not erase facts or history) |
 | `/facts`                      | list everything stored in the `facts` table                           |
 | `/remember key=value`         | upsert a fact lemon will see in the `<user_facts>` block next turn    |
 | `/forget key`                 | delete a fact                                                         |
@@ -23,7 +24,7 @@ Type any of these in the CLI or web input. Anything starting with `/` is dispatc
 | `/empathy on\|off`            | toggle the empathy pipeline (no arg shows current status)             |
 | `/autofacts on\|off`          | toggle automatic fact extraction (no arg shows current status)        |
 | `/cache on\|off`              | toggle Anthropic-style prompt caching (no arg shows current status)   |
-| `/why`                        | show the empathy-pipeline trace for the last reply                    |
+| `/why`                        | show the empathy-pipeline trace for the last reply (both agents' state trajectories) |
 | `/quit` or `/exit`            | end the chat                                                          |
 
 ## Examples
@@ -35,18 +36,44 @@ remembered: college_year = second
 ```
 Next turn, lemon's prompt includes a `<user_facts>` block that lists `college_year: second`.
 
-**See the current mood / energy:**
+**See lemon's current three-layer state:**
 ```
 you: /state
-{
-  "mood": "good",
-  "energy": "medium",
-  "engagement": "deep",
-  "emotional_thread": "curious about exam result",
-  "recent_activity": null,
-  "disposition": "warm"
-}
+lemon_state:
+  mood: content
+  PAD: pleasure +0.30, arousal +0.00, dominance +0.10
+  traits:
+    openness           +0.50
+    conscientiousness  -0.20
+    extraversion       +0.30
+    agreeableness      +0.80
+    neuroticism        -0.60
+  adaptations:
+    goals:    be present for the user, match their energy without forcing it
+    values:   honesty, warmth without performance, calm
+    concerns: (none)
+    stance:   close friend, not assistant
 ```
+
+**Or pull up what lemon thinks about the user right now:**
+```
+you: /user_state
+user_state:
+  mood: tired
+  PAD: pleasure -0.20, arousal +0.10, dominance -0.05
+  traits:
+    openness           +0.00
+    conscientiousness  +0.00
+    extraversion       +0.00
+    agreeableness      +0.60
+    neuroticism        -0.30
+  adaptations:
+    goals:    prep tuesday exam
+    values:   family
+    concerns: feeling unprepared
+    stance:   open, slightly tired
+```
+Both blocks render the same three-layer schema (Big 5 traits, characteristic adaptations, PAD core affect plus a derived mood label). See `docs/dyadic_state.md` for the design.
 
 **Undo a misfire:**
 ```
@@ -76,8 +103,15 @@ last reply's pipeline trace:
   avoid:     don't jump to advice
   do:        stay with it, ask one open question
   memories used: 2
+  user mood: neutral -> low
+    PAD nudge: p-0.15 a+0.05
+    added: rough day
+  lemon mood: content
+    PAD nudge: p-0.05
+    added: user had a rough day today
   post-check: passed
 ```
+The two trajectory blocks (`user mood` / `lemon mood`) are the dyadic-state delta for each agent across the turn. Lemon stays close to her baseline because her dynamics are damped harder than the user's; the schema is the same.
 
 **Turn the pipeline off (e.g. for cost or latency):**
 ```
@@ -140,14 +174,20 @@ Useful when the in-context history is getting long and you want a fresh visual c
 Every command is just a function decorated with `@command(name, help_text)`. The decorator registers it with the dispatcher.
 
 ```python
-@command("mood", "force a mood: /mood happy")
+@command("mood", "force lemon's mood label: /mood happy")
 def _mood(ctx: ChatContext, args: str) -> CommandResult:
+    from storage.user_state import MOOD_LABELS
+    from storage.lemon_state import save_lemon_state
     new = args.strip()
     if not new:
-        return CommandResult(f"current mood: {ctx.internal_state['mood']}")
-    ctx.internal_state["mood"] = new
-    state_mod.save_state(ctx.internal_state, session_id=ctx.session_id)
+        return CommandResult(f"current mood: {ctx.lemon_state['state']['mood_label']}")
+    if new not in MOOD_LABELS:
+        return CommandResult(f"unknown mood {new!r}. valid: {', '.join(MOOD_LABELS)}")
+    ctx.lemon_state["state"]["mood_label"] = new
+    save_lemon_state(ctx.lemon_state, session_id=ctx.session_id)
     return CommandResult(f"mood forced to {new}.")
 ```
 
 Drop that into `src/commands.py` and it's available in both CLI and web.
+
+`ctx.lemon_state` and `ctx.user_state` are the two three-layer state objects (see `docs/dyadic_state.md` §6). Each has the same shape: `traits` (Big 5), `adaptations` (current_goals / values / concerns / relational_stance), `state` (PAD coordinates + mood_label).

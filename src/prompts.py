@@ -41,11 +41,12 @@ from temporal.clock import session_duration_note, time_of_day_label
 
 PERSONA_TAG = "<Who you are>"
 TIME_TAG = "<time_context>"
-STATE_TAG = "<internal_state>"
+LEMON_STATE_TAG = "<lemon_state>"           # stage 3: replaces <internal_state>
+STATE_TAG = LEMON_STATE_TAG                 # backward-compat alias for any imports
 FACTS_TAG = "<user_facts>"
 MEMORY_TAG = "<emotional_memory>"
-EMOTION_TAG = "<user_emotion>"
-TOM_TAG = "<theory_of_mind>"
+USER_STATE_TAG = "<user_state>"             # already declared in §8b but keep here too
+READING_TAG = "<reading>"                   # stage 3: unified phasic emotion + ToM
 EARLIER_CONVERSATION_TAG = "<earlier_conversation>"
 CRITIQUE_TAG = "<empathy_retry>"
 
@@ -201,29 +202,57 @@ Time of day: {time_of_day_label(now.hour)}
 
 
 # =============================================================================
-# 4. INTERNAL STATE BLOCK
+# 4. LEMON STATE BLOCK (dyadic-state stage 3)
 # =============================================================================
+# Lemon's three-layer tonic state: traits + characteristic adaptations + PAD
+# core affect. Same shape as the user-side block; lemon-side prose framing.
 
-def format_internal_state(state: dict) -> str:
-    thread = state["emotional_thread"] or "nothing specific"
-    activity = state["recent_activity"] or "nothing worth mentioning"
+def format_lemon_state(state: dict) -> str:
+    """Compact prose rendering of lemon's tonic state for the system stack.
 
-    return f"""
-<internal_state>
-This is your current internal state. It is the reason behind how you text, not something you talk about.
-Your responses should naturally reflect this state without ever naming it.
+    Mirrors `format_user_state_block` in shape; uses lemon-voice framing.
+    """
+    s = (state or {}).get("state") or {}
+    traits = (state or {}).get("traits") or {}
+    adapt = (state or {}).get("adaptations") or {}
 
-Mood: {state["mood"]}
-Energy: {state["energy"]}
-Engagement level: {state["engagement"]}
-What's on your mind: {thread}
-What you've been up to: {activity}
-Disposition toward this person right now: {state["disposition"]}
+    mood = s.get("mood_label") or "neutral"
+    pleasure = float(s.get("pleasure", 0.0))
+    arousal = float(s.get("arousal", 0.0))
+    dominance = float(s.get("dominance", 0.0))
 
-Let this shape your word choice, reply length, warmth, and how much you push the conversation.
-Do not perform these states. Just let them bleed through naturally.
-</internal_state>
-""".strip()
+    lines = [
+        f"Mood right now: {mood} (pleasure {pleasure:+.2f}, arousal {arousal:+.2f}, dominance {dominance:+.2f})",
+    ]
+    trait_specs = [
+        (float(traits.get("openness", 0.0)),          "openness"),
+        (float(traits.get("conscientiousness", 0.0)), "conscientiousness"),
+        (float(traits.get("extraversion", 0.0)),      "extraversion"),
+        (float(traits.get("agreeableness", 0.0)),     "agreeableness"),
+        (float(traits.get("neuroticism", 0.0)),       "neuroticism"),
+    ]
+    descriptors = [d for d in (_trait_descriptor(v, l) for v, l in trait_specs) if d]
+    if descriptors:
+        lines.append("You are: " + ", ".join(descriptors) + ".")
+    if adapt.get("current_goals"):
+        lines.append("What you care about doing: " + ", ".join(adapt["current_goals"]) + ".")
+    if adapt.get("values"):
+        lines.append("What you value: " + ", ".join(adapt["values"]) + ".")
+    if adapt.get("concerns"):
+        lines.append("Quietly on your mind: " + ", ".join(adapt["concerns"]) + ".")
+    else:
+        lines.append("Quietly on your mind: nothing in particular.")
+    if adapt.get("relational_stance"):
+        lines.append(f"Stance with this person: {adapt['relational_stance']}.")
+
+    body = "\n".join(lines)
+    return (
+        f"{LEMON_STATE_TAG}\n"
+        "Your current internal state. It is the reason behind how you text, "
+        "not something you talk about. Let it bleed through naturally; never name it.\n\n"
+        f"{body}\n"
+        "</lemon_state>"
+    )
 
 
 # =============================================================================
@@ -296,38 +325,49 @@ EMOTION_LABELS = [
 ]
 
 
-def format_emotion_block(emotion: dict) -> str:
+def format_reading_block(emotion: dict, tom: dict) -> str:
+    """Unified per-turn read of the user's latest message: phasic emotion +
+    theory-of-mind, in a single block. Replaces the old separate
+    `<user_emotion>` and `<theory_of_mind>` blocks.
+
+    Stage 3 of the dyadic-state architecture: the user's *tonic* state lives
+    in `<user_state>`; this block is the *phasic* layer — what landed in the
+    last message and what to do about it.
+    """
     primary = emotion.get("primary", "neutral")
     intensity = emotion.get("intensity", 0.0)
     need = emotion.get("underlying_need")
     undertones = emotion.get("undertones") or []
+    feeling = (tom or {}).get("feeling") or "unclear"
+    avoid = (tom or {}).get("avoid") or "(no specific guidance)"
+    helps = (tom or {}).get("what_helps") or "(no specific guidance)"
 
-    need_line = f"What they probably want: {need}" if need else "What they probably want: unclear"
-    undertone_line = (
-        f"Undertones: {', '.join(undertones)}" if undertones else "Undertones: none"
-    )
     intensity_word = (
         "mild" if intensity < 0.3
         else "moderate" if intensity < 0.6
         else "strong" if intensity < 0.85
         else "very strong"
     )
+    undertone_line = (
+        f"Undertones: {', '.join(undertones)}" if undertones else "Undertones: none"
+    )
+    need_line = f"What they probably want: {need}" if need else "What they probably want: unclear"
 
-    return f"""
-<user_emotion>
-A separate read of the user's last message before you reply. Treat this as background — do not name or quote it.
+    return f"""{READING_TAG}
+A read of what the user just said, fresh this turn. Pairs with `<user_state>` (their carried-in tonic state). Treat this as background; do not name or quote it.
 
 Primary feeling: {primary} ({intensity_word}, intensity {intensity:.2f})
 {undertone_line}
 {need_line}
-
-Let this shape your tone, length, and whether to ask vs. acknowledge. Do not echo the label back.
-</user_emotion>
-""".strip()
+What they're actually feeling: {feeling}
+What helps: {helps}
+What to avoid: {avoid}
+</reading>""".strip()
 
 
 # =============================================================================
-# 8. THEORY OF MIND BLOCK
+# 8. THEORY OF MIND BLOCK (legacy formatter — kept for tests; pipeline uses
+# format_reading_block instead in stage 3)
 # =============================================================================
 
 def format_tom_block(tom: dict) -> str:
@@ -344,6 +384,88 @@ Don't: {avoid}
 Do: {helps}
 </theory_of_mind>
 """.strip()
+
+
+# =============================================================================
+# 8b. USER STATE BLOCK (dyadic-state stage 1)
+# =============================================================================
+# The user's persistent tonic state: traits + characteristic adaptations + PAD
+# core affect. Sits BEFORE <reading> in the prompt stack so the model reads
+# tonic-then-phasic for the user, paralleling lemon's own ordering.
+# Tag declared in section 1 for visibility; formatter lives here.
+
+def _trait_descriptor(value: float, label: str) -> Optional[str]:
+    """Render a trait value as a short readable descriptor, or None if it's
+    too close to the population mean to be worth surfacing."""
+    if abs(value) < 0.15:
+        return None
+    if value >= 0.5:
+        return f"high {label}"
+    if value <= -0.5:
+        return f"low {label}"
+    if value > 0:
+        return f"somewhat {label}"
+    return f"slightly low {label}"
+
+
+def format_user_state_block(state: Optional[dict]) -> str:
+    """Compact prose rendering of the user's tonic state for the system stack.
+
+    Cold-start (default-shaped state) collapses to a one-line low-confidence
+    notice. The block is framed as background context — the model is told not
+    to narrate it.
+    """
+    if not state:
+        body = "First read of this person — let your reply do the inferring."
+    else:
+        s = state.get("state") or {}
+        traits = state.get("traits") or {}
+        adapt = state.get("adaptations") or {}
+
+        mood = s.get("mood_label") or "neutral"
+        pleasure = float(s.get("pleasure", 0.0))
+        arousal = float(s.get("arousal", 0.0))
+        dominance = float(s.get("dominance", 0.0))
+
+        is_pad_zero = abs(pleasure) < 1e-6 and abs(arousal) < 1e-6 and abs(dominance) < 1e-6
+        no_adapt = (
+            not any(adapt.get(k) for k in ("current_goals", "values", "concerns"))
+            and not adapt.get("relational_stance")
+        )
+        if is_pad_zero and no_adapt and mood == "neutral":
+            body = "First read of this person — let your reply do the inferring."
+        else:
+            lines = [
+                f"Mood: {mood} (pleasure {pleasure:+.2f}, arousal {arousal:+.2f}, dominance {dominance:+.2f})",
+            ]
+            trait_specs = [
+                (float(traits.get("openness", 0.0)),          "openness"),
+                (float(traits.get("conscientiousness", 0.0)), "conscientiousness"),
+                (float(traits.get("extraversion", 0.0)),      "extraversion"),
+                (float(traits.get("agreeableness", 0.0)),     "agreeableness"),
+                (float(traits.get("neuroticism", 0.0)),       "neuroticism"),
+            ]
+            descriptors = [d for d in (_trait_descriptor(v, l) for v, l in trait_specs) if d]
+            if descriptors:
+                lines.append("Roughly: " + ", ".join(descriptors) + ".")
+            if adapt.get("current_goals"):
+                lines.append("On their mind: " + ", ".join(adapt["current_goals"]) + ".")
+            if adapt.get("values"):
+                lines.append("Cares about: " + ", ".join(adapt["values"]) + ".")
+            if adapt.get("concerns"):
+                lines.append("Worries: " + ", ".join(adapt["concerns"]) + ".")
+            if adapt.get("relational_stance"):
+                lines.append(f"How they're showing up: {adapt['relational_stance']}.")
+            body = "\n".join(lines)
+
+    return (
+        f"{USER_STATE_TAG}\n"
+        "Background read of the person you're talking to. "
+        "Lets your responses match where they are right now, not just the latest message. "
+        "Do not narrate this.\n\n"
+        f"{body}\n"
+        "</user_state>"
+    )
 
 
 # =============================================================================
@@ -390,11 +512,15 @@ You just produced this draft: "{snippet}"
 def build_user_read_prompt(
     user_msg: str,
     recent_msgs: Optional[list[dict]],
+    current_user_state: Optional[dict] = None,
+    current_lemon_state: Optional[dict] = None,
 ) -> str:
     context = format_recent_for_prompt(recent_msgs)
     label_csv = ", ".join(EMOTION_LABELS)
+    user_view = _format_user_state_for_read(current_user_state)
+    lemon_view = _format_lemon_state_for_read(current_lemon_state)
     return f"""
-You read the user's latest message and produce TWO pieces of private context for the responder. You are NOT replying to the user.
+You read the user's latest message and produce FOUR pieces of private context for the responder (which is lemon). You are NOT replying to the user.
 
 Recent conversation:
 {context}
@@ -402,38 +528,134 @@ Recent conversation:
 Latest user message:
 "{user_msg}"
 
-Return a JSON object with exactly two top-level keys: "emotion" and "tom".
+Current background state of the user (carried in from prior turns):
+{user_view}
 
-"emotion" — a structured read of their emotional state:
+Current background state of lemon (the responder), going INTO this turn:
+{lemon_view}
+
+Return a JSON object with exactly four top-level keys: "emotion", "tom", "user_state_delta", and "lemon_state_delta".
+
+"emotion" — a structured read of the user's emotional state in this single message:
   - "primary": one of [{label_csv}]
   - "intensity": float between 0.0 (very mild) and 1.0 (very strong)
   - "underlying_need": short string describing what they probably want from the next reply (e.g. "feel heard, not solved", "be distracted", "get a straight answer"), or null if unclear
   - "undertones": list of zero to three secondary emotions from the same label set
 
-"tom" — what they actually need from the responder (be specific to THIS exchange, not generic):
+"tom" — what the user actually needs from lemon (be specific to THIS exchange, not generic):
   - "feeling": one sentence on what they are actually feeling, including anything they are not saying directly
-  - "avoid": one specific thing the responder should NOT do (e.g. "don't jump to advice", "don't minimize with 'at least'", "don't ask another question, just sit with it")
-  - "what_helps": one specific thing the responder SHOULD do to make them feel understood
+  - "avoid": one specific thing lemon should NOT do (e.g. "don't jump to advice", "don't minimize with 'at least'", "don't ask another question, just sit with it")
+  - "what_helps": one specific thing lemon SHOULD do to make them feel understood
 
-Be honest. If the message is flat small-talk, "neutral" with low intensity is the right answer, and short noncommittal guidance for tom is fine. Do not over-pathologize.
+"user_state_delta" — small adjustments to the user's persistent background state, based on this message. SUBTLE NUDGES ONLY. Most turns the values should be at or near zero. The state above evolves slowly across many turns; do not overshoot.
+  - "pad": object with three floats in [-0.15, +0.15] — incremental change to pleasure / arousal / dominance for THIS message only
+  - "mood_label": one of [neutral, calm, content, happy, excited, anxious, low, tense, tired, frustrated], or null if unchanged
+  - "trait_nudges": object with optional float keys (any subset of openness, conscientiousness, extraversion, agreeableness, neuroticism), each in [-0.02, +0.02]. Traits are essentially fixed; only nudge with strong evidence of stable disposition. Empty object is the default.
+  - "goal_add" / "goal_remove": up to 2 short strings each
+  - "concern_add" / "concern_remove": up to 2 short strings each
+  - "value_add": up to 1 short string; rare
+  - "stance": short string or null — replacement relational stance, only if it has clearly shifted
+
+"lemon_state_delta" — how lemon's OWN tonic state would naturally shift in response to what the user just said. EVEN MORE SUBTLE than the user's. Lemon is a stable warm friend; she is allowed to feel something but she does not match-and-mirror the user's swings. Most turns this is all-zeros / empty / null. Same shape as user_state_delta:
+  - "pad": three floats in [-0.10, +0.10] (tighter cap than the user side — lemon is damped harder)
+  - "mood_label": same vocabulary as the user side, or null
+  - "trait_nudges": empty {{}} for stage 3 — lemon's traits are fixed by her persona and DO NOT drift. Always emit {{}}.
+  - "goal_add" / "goal_remove": at most one entry; rare. Lemon's goals are mostly stable.
+  - "concern_add" / "concern_remove": small list. If the user shared something heavy, lemon may quietly carry one new concern about them. If the user resolved something, lemon may drop the matching concern.
+  - "value_add": always []. Lemon's values are fixed.
+  - "stance": null in almost every case. Only set when the relational dynamic genuinely shifted.
+
+Be honest and conservative across all four objects. If the message is flat small-talk: "neutral" emotion with low intensity, short noncommittal tom, both deltas all-zeros / empty / null. Do not over-pathologize. Do not invent state changes that aren't grounded in the message.
 
 Respond with ONLY the JSON object. No explanation, no markdown.
 """.strip()
 
 
+def _format_lemon_state_for_read(state: Optional[dict]) -> str:
+    """Compact rendering of lemon's current tonic state for the user_read
+    prompt's lemon-side delta context. Lemon-voice ("you" framing)."""
+    if not state:
+        return "(no prior state — fresh start)"
+    s = state.get("state") or {}
+    mood = s.get("mood_label") or "neutral"
+    pleasure = float(s.get("pleasure", 0.0))
+    arousal = float(s.get("arousal", 0.0))
+    dominance = float(s.get("dominance", 0.0))
+    adapt = state.get("adaptations") or {}
+    lines = [
+        f"Mood: {mood} (pleasure {pleasure:+.2f}, arousal {arousal:+.2f}, dominance {dominance:+.2f})",
+    ]
+    if adapt.get("concerns"):
+        lines.append("Quietly on lemon's mind: " + ", ".join(adapt["concerns"]) + ".")
+    if adapt.get("relational_stance"):
+        lines.append(f"Stance: {adapt['relational_stance']}.")
+    return "\n".join(lines)
+
+
+def _format_user_state_for_read(state: Optional[dict]) -> str:
+    """Compact, model-readable rendering of the current user_state for the
+    user_read prompt. Cold-start (all-zero, empty) collapses to a one-line
+    notice so the model knows it has no prior signal to anchor to.
+    """
+    if not state:
+        return "(no prior state — first read of this person)"
+
+    s = state.get("state") or {}
+    mood = s.get("mood_label") or "neutral"
+    pleasure = float(s.get("pleasure", 0.0))
+    arousal = float(s.get("arousal", 0.0))
+    dominance = float(s.get("dominance", 0.0))
+
+    traits = state.get("traits") or {}
+    adapt = state.get("adaptations") or {}
+
+    # Cold-start guard: zeroed PAD and empty adaptations means we have nothing.
+    is_pad_zero = abs(pleasure) < 1e-6 and abs(arousal) < 1e-6 and abs(dominance) < 1e-6
+    no_adapt = not any(adapt.get(k) for k in ("current_goals", "values", "concerns")) and not adapt.get("relational_stance")
+    if is_pad_zero and no_adapt and mood == "neutral":
+        return "(no prior state — first read of this person)"
+
+    lines = [
+        f"Mood: {mood} (pleasure {pleasure:+.2f}, arousal {arousal:+.2f}, dominance {dominance:+.2f})",
+    ]
+    trait_pairs = [
+        ("openness", "open"), ("conscientiousness", "structured"),
+        ("extraversion", "outgoing"), ("agreeableness", "agreeable"),
+        ("neuroticism", "reactive"),
+    ]
+    trait_bits = []
+    for key, label in trait_pairs:
+        v = float(traits.get(key, 0.0))
+        if abs(v) < 0.1:
+            continue
+        descriptor = "high" if v > 0.5 else "low" if v < -0.5 else "somewhat"
+        sign = "" if v > 0 else "low-"
+        trait_bits.append(f"{descriptor} {label}" if v > 0 else f"{descriptor} {sign}{label}")
+    if trait_bits:
+        lines.append("Roughly: " + ", ".join(trait_bits) + ".")
+    if adapt.get("current_goals"):
+        lines.append("On their mind: " + ", ".join(adapt["current_goals"]) + ".")
+    if adapt.get("values"):
+        lines.append("Cares about: " + ", ".join(adapt["values"]) + ".")
+    if adapt.get("concerns"):
+        lines.append("Worries: " + ", ".join(adapt["concerns"]) + ".")
+    if adapt.get("relational_stance"):
+        lines.append(f"How they're showing up: {adapt['relational_stance']}.")
+    return "\n".join(lines)
+
+
 # =============================================================================
-# 12. CLASSIFIER: BOOKKEEP (facts + state nudge, one LLM call)
+# 12. CLASSIFIER: BOOKKEEP (facts only — stages 2+3 of dyadic state)
 # =============================================================================
-# Sent as the only message in a STATE_MODEL call AFTER the reply is
-# delivered. Response shape: {"facts": {...}, "state": {...}}. Validators
-# live in empathy/fact_extractor.py (`_validate`) and storage/state.py
-# (`validate_state`).
+# Sent as the only message in a STATE_MODEL call AFTER the reply is delivered.
+# Response shape: {"facts": {...}}. State updates moved pre-reply with stage 2;
+# the lemon-state nudge half of this prompt is gone. Validator lives in
+# `empathy/fact_extractor._validate`.
 
 def build_bookkeep_prompt(
     user_msg: str,
     bot_reply: str,
     existing_facts: dict,
-    current_state: dict,
     recent_msgs: Optional[list[dict]],
     max_new: int,
 ) -> str:
@@ -444,10 +666,8 @@ def build_bookkeep_prompt(
     else:
         known = "  (none yet)"
 
-    state_json = json.dumps(current_state, indent=2)
-
     return f"""
-You read the most recent exchange between the user and lemon (a friendly chatbot) and produce TWO pieces of bookkeeping. You are NOT replying to the user.
+You read the most recent exchange between the user and lemon (a friendly chatbot) and extract any new or updated facts about the user a close friend would naturally remember. You are NOT replying to the user.
 
 Recent conversation:
 {context}
@@ -459,10 +679,7 @@ You (lemon): {bot_reply}
 Already stored facts about the user:
 {known}
 
-Current internal state of lemon:
-{state_json}
-
-Return a JSON object with exactly two top-level keys: "facts" and "state".
+Return a JSON object with a single top-level key "facts".
 
 "facts" — NEW or UPDATED facts a close friend would naturally remember. Examples of what to save:
 - Names (user, family, partner, pets, close friends)
@@ -495,15 +712,5 @@ Hygiene rules:
 - Values: short plain strings, max 200 chars.
 - If nothing is worth saving, return an empty object `{{}}`.
 
-"state" — small, realistic updates to lemon's internal state, same shape as above (mood, energy, engagement, emotional_thread, recent_activity, disposition).
-Rules:
-- Subtle nudges, not dramatic shifts. A single message rarely changes mood or energy much.
-- Only change fields where this exchange genuinely warrants it.
-- engagement should reflect how present and interested the user seems right now.
-- emotional_thread captures anything that seems to be on lemon's mind after this exchange. Can be null.
-- recent_activity should only be set if the conversation has causally established something lemon has been doing. Do not invent.
-- disposition shifts only if the user's tone or behavior warrants it.
-- Include ALL keys from the current state (copy through unchanged ones).
-
-Respond with ONLY the JSON object. No explanation, no markdown.
+Respond with ONLY the JSON object (e.g. `{{"facts": {{"city": "kanpur"}}}}`). No explanation, no markdown.
 """.strip()

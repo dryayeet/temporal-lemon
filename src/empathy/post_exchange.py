@@ -1,9 +1,9 @@
-"""Merged post-generation bookkeeping: one LLM call covering facts + state.
+"""Post-generation bookkeeping: facts extraction only (stages 2 + 3).
 
-Replaces the old pair of separate fact-extractor and state-updater
-round-trips with a single STATE_MODEL call. The model reads the just-
-completed exchange and emits a JSON object with two sub-dicts matching
-the existing downstream contracts exactly.
+Stage 1 had this module doing both facts AND a lemon-state nudge in one
+merged round-trip. Stage 2 moved the lemon-state update pre-reply (it now
+flows through `empathy/user_read.py` alongside the user-state delta), so
+this module shrinks to just fact extraction.
 
 The prompt itself lives in `prompts.build_bookkeep_prompt`.
 """
@@ -20,7 +20,6 @@ from empathy.fact_extractor import _validate as _validate_facts
 from llm.parse_utils import strip_json_fences
 from logging_setup import get_logger, preview, shape_of
 from prompts import build_bookkeep_prompt
-from storage.state import DEFAULT_STATE, validate_state
 
 log = get_logger("empathy.post_exchange")
 
@@ -29,27 +28,23 @@ def bookkeep(
     user_msg: str,
     bot_reply: str,
     existing_facts: Optional[dict] = None,
-    current_state: Optional[dict] = None,
     recent_msgs: Optional[list[dict]] = None,
     model: Optional[str] = None,
     max_new: int = 3,
-) -> tuple[dict[str, str], dict]:
-    """Single STATE_MODEL round-trip. Returns (new_facts, nudged_state).
+) -> dict[str, str]:
+    """Single STATE_MODEL round-trip. Returns a dict of new facts only.
 
-    On any failure: returns ({}, current_state) so the caller can safely
-    upsert nothing and keep the existing state snapshot.
+    On any failure: returns {} so the caller can safely upsert nothing.
     """
     existing = existing_facts or {}
-    state_in = dict(current_state) if current_state else dict(DEFAULT_STATE)
     chosen_model = model or STATE_MODEL
 
     log.debug(
-        "bookkeep_input user_msg=%r reply=%r facts=%s state=%s",
-        preview(user_msg), preview(bot_reply),
-        shape_of(existing), shape_of(state_in),
+        "bookkeep_input user_msg=%r reply=%r facts=%s",
+        preview(user_msg), preview(bot_reply), shape_of(existing),
     )
 
-    prompt = build_bookkeep_prompt(user_msg, bot_reply, existing, state_in, recent_msgs, max_new)
+    prompt = build_bookkeep_prompt(user_msg, bot_reply, existing, recent_msgs, max_new)
 
     started = time.time()
     try:
@@ -59,7 +54,7 @@ def bookkeep(
             json={
                 "model": chosen_model,
                 "temperature": 0.2,
-                "max_tokens": 500,
+                "max_tokens": 350,  # tighter — facts only, smaller output
                 "messages": [{"role": "user", "content": prompt}],
             },
             timeout=30,
@@ -75,30 +70,25 @@ def bookkeep(
         if not isinstance(parsed, dict):
             raise ValueError("post_exchange response was not a JSON object")
 
-        facts_sub = parsed.get("facts") if isinstance(parsed.get("facts"), dict) else {}
-        state_sub = parsed.get("state") if isinstance(parsed.get("state"), dict) else {}
+        # Accept either {"facts": {...}} (legacy/merged shape) or {...} (flat)
+        facts_sub = parsed.get("facts") if isinstance(parsed.get("facts"), dict) else parsed
 
         new_facts = (
             _validate_facts(facts_sub, max_new, existing_keys=existing.keys())
             if facts_sub else {}
         )
-        new_state = validate_state(state_sub, fallback=state_in) if state_sub else state_in
 
-        changed_state_keys = [k for k in DEFAULT_STATE if state_in.get(k) != new_state.get(k)]
         log.info(
-            "bookkeep elapsed_ms=%d new_facts=%d state_changed=%s",
-            elapsed_ms, len(new_facts), changed_state_keys,
+            "bookkeep elapsed_ms=%d new_facts=%d",
+            elapsed_ms, len(new_facts),
         )
-        log.debug(
-            "bookkeep_detail facts=%s state_before=%s state_after=%s",
-            new_facts, state_in, new_state,
-        )
-        return new_facts, new_state
+        log.debug("bookkeep_detail facts=%s", new_facts)
+        return new_facts
 
     except requests.HTTPError as e:
         body = getattr(e.response, "text", "")[:300]
         log.warning("bookkeep_http_error error=%r body=%s", e, body)
-        return {}, state_in
+        return {}
     except (requests.RequestException, json.JSONDecodeError, ValueError, KeyError) as e:
         log.warning("bookkeep_failed error=%r", e)
-        return {}, state_in
+        return {}

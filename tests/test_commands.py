@@ -1,11 +1,15 @@
+import copy
+
 from commands import ChatContext, dispatch, is_command
 from storage import db
-from storage.state import DEFAULT_STATE
+from storage.lemon_state import DEFAULT_LEMON_STATE
 
 
 def make_ctx(**overrides):
     # use a real session so foreign-key constraints in db are satisfied
     sid = db.start_session()
+    lemon_state = copy.deepcopy(DEFAULT_LEMON_STATE)
+    lemon_state["state"]["mood_label"] = "happy"
     base = ChatContext(
         history=[
             {"role": "system", "content": "<persona>"},
@@ -13,7 +17,7 @@ def make_ctx(**overrides):
             {"role": "user", "content": "hi"},
             {"role": "assistant", "content": "what's up"},
         ],
-        internal_state=dict(DEFAULT_STATE, mood="good"),
+        lemon_state=lemon_state,
         chat_model="test/model",
         session_id=sid,
     )
@@ -53,10 +57,13 @@ def test_unknown_command_hints_help():
 
 # ---------- /state ----------
 
-def test_state_dumps_internal_state_as_json():
+def test_state_renders_lemon_state_block():
     ctx = make_ctx()
     out = dispatch("/state", ctx).output
-    assert "mood" in out and "good" in out
+    assert "lemon_state" in out
+    assert "mood: happy" in out  # mood_label was set in make_ctx
+    assert "traits" in out
+    assert "PAD" in out
 
 
 # ---------- /reset ----------
@@ -64,7 +71,7 @@ def test_state_dumps_internal_state_as_json():
 def test_reset_returns_state_to_defaults():
     ctx = make_ctx()
     res = dispatch("/reset", ctx)
-    assert ctx.internal_state == DEFAULT_STATE
+    assert ctx.lemon_state == DEFAULT_LEMON_STATE
     assert res.reload_state is True
 
 

@@ -1,13 +1,15 @@
 # Dyadic state architecture
 
-> **Status: proposal under discussion. NOT implemented.**
-> Captures the rationale, research grounding, and proposed shape of an
-> architectural shift from the current asymmetric internal-state design
-> (lemon has tonic mood, user has only per-message phasic reads) to a
-> symmetric dyadic-state design where both agents are modelled as the same
-> kind of object and response generation is downstream of state.
+> **Status: stages 1, 2, and 3 SHIPPED.**
+> Both lemon and the user are now modelled with the same three-layer schema
+> (Big 5 traits + characteristic adaptations + PAD core affect). Per-turn
+> state updates happen pre-reply for both agents in a single merged LLM
+> call; response generation reads from freshly-updated states. The legacy
+> 6-field internal_state shape is deprecated in favour of the unified
+> three-layer schema.
 >
-> Author: lemon, in discussion with the project assistant, 2026-04-26.
+> Author: lemon, in discussion with the project assistant. Initial draft
+> 2026-04-26; stages 2+3 landed 2026-04-27.
 
 ---
 
@@ -341,96 +343,171 @@ return to the older, more principled framing with modern LLM tooling.
 
 ---
 
-## 6. Concrete schema sketch
+## 6. Unified internal-state representation (LOCKED)
 
-### 6.1 Unified tonic state (applies to both lemon and user)
+The representation question — *what does an internal-state object actually
+look like, psychologically* — has been settled. Per agent, a **three-layer
+representation** following McAdams' integrative framework, with each layer
+operationalised by the most empirically-defensible model in its category.
+
+### 6.1 The three layers
+
+| layer | timescale | what it represents | model used | dynamics |
+| --- | --- | --- | --- | --- |
+| **Traits** | months / years (essentially static) | dispositional tendencies | **Big 5 / OCEAN** | hardcoded for lemon; slowly inferred for the user |
+| **Characteristic adaptations** | weeks / months (evolves) | goals, values, concerns, relational stance | structured strings (free-form, optionally Schwartz-tagged) | accumulates and prunes across sessions |
+| **State (mood)** | hours / days (drifts) | current background affect | **PAD (Pleasure-Arousal-Dominance)** + derived categorical mood label | nudged each turn by phasic events, reverts toward trait-defined home range |
+
+Plus, **per turn (ephemeral)**:
+
+| object | timescale | what it represents | model used |
+| --- | --- | --- | --- |
+| **Phasic emotion event** | seconds | acute reaction to the latest exchange | the existing 23-label categorical (already implemented) + intensity |
+
+This is McAdams' three-level model (Levels 1, 2, 3) with the affect layer
+implemented per Russell core affect / Mehrabian-Russell PAD, and phasic
+events as the *input* that nudges the state layer (per Whole Trait Theory:
+states are samples from trait-shaped distributions).
+
+### 6.2 Concrete schema (applies to both lemon and user)
 
 ```python
-TONIC_STATE = {
-    "mood":            <vocab>,        # categorical, see §6.2
-    "energy":          "low" | "medium" | "high",
-    "engagement":      "low" | "normal" | "deep",
-    "current_focus":   str | None,     # what's on their mind right now
-    "carried_in":      str | None,     # cross-session continuity
-    "stance":          <stance_vocab>, # how they relate to the other agent
+INTERNAL_STATE = {
+    # Layer 1: Big 5 traits (each in [-1, +1])
+    "traits": {
+        "openness":          float,
+        "conscientiousness": float,
+        "extraversion":      float,
+        "agreeableness":     float,
+        "neuroticism":       float,
+    },
+
+    # Layer 2: characteristic adaptations
+    "adaptations": {
+        "current_goals":     list[str],   # what they're trying to do
+        "values":            list[str],   # what matters to them
+        "concerns":          list[str],   # what's on their mind
+        "relational_stance": str | None,  # how they show up to the other agent
+    },
+
+    # Layer 3: PAD core affect
+    "state": {
+        "pleasure":   float,   # [-1, +1]
+        "arousal":    float,   # [-1, +1]
+        "dominance":  float,   # [-1, +1]
+        "mood_label": str,     # derived; whitelisted from a small folksy set
+    },
 }
 ```
 
-Same shape for both agents. Field semantics may shift slightly per
-agent (e.g. `stance` for lemon = `disposition` toward the user; for the
-user = how they're showing up to lemon today). Not all fields will be
-populated for the user from day one — `mood` and `current_focus` are
-the most tractable to infer, the rest can fill in over sessions.
-
-### 6.2 Mood vocabulary
-
-Two viable options, to be picked during design:
-
-**Option A: keep the small mood vocabulary, apply to both.** The
-existing 8-value mood set (`neutral | good | low | happy | anxious |
-restless | tired | content`) preserves the "subtle nudge" dynamics. The
-EMOTION_LABELS set stays separate for *phasic* reads.
-
-**Option B: Russell-circumplex inspired.** Replace mood with a
-two-axis low-cardinality scheme: valence × arousal × small label set
-(e.g. four quadrants plus neutral: `pleasant_calm`, `pleasant_active`,
-`unpleasant_calm`, `unpleasant_active`, `neutral`). More principled,
-but loses the folksy readability.
-
-Recommendation when this gets decided: **Option A**. Russell-derived
-schemes look clean on paper but in practice the categorical labels are
-what the LLM reasons about; quadrant labels lose the prompt-engineering
-affordance.
-
-### 6.3 Phasic event (per turn, per agent)
+Phasic event (per turn, ephemeral, **separate** from this object):
 
 ```python
 PHASIC = {
-    "event_emotion": <EMOTION_LABEL>,   # from existing 23-label set
-    "intensity":     float,              # [0, 1]
-    "appraisal":     str | None,         # what about the message triggered this
-    "trigger":       "self" | "other",   # whose utterance caused it
+    "event_emotion": str,    # one of EMOTION_LABELS (the 23-label vocab)
+    "intensity":     float,  # [0, 1]
+    "appraisal":     str | None,  # what about the message triggered this
 }
 ```
 
-For the user: today's `user_read` already produces most of this. For
-lemon: a new small read pass, OR an extension of `post_exchange`.
+### 6.3 Why these specific picks
 
-### 6.4 Theory of mind (separate object)
+**Big 5 over MBTI / cognitive functions / Enneagram.** The empirical case
+is one-sided. MBTI test-retest reliability is so weak that 39–76% of
+people get a different type after five weeks; the cognitive functions
+layer has even less empirical support; Enneagram has mixed reliability
+and validity. Big 5 has decades of cross-cultural validation, predicts
+real-life outcomes ~2× better than MBTI, and is continuous (not
+categorical). It's also already the de facto standard for LLM persona
+research (Serapio-García et al. 2023; PersonaLLM; *LLMs Simulate Big5*
+2024). Using anything weaker as the trait layer would be a structural
+mistake. **HEXACO** (Big 5 + Honesty-Humility) is a reasonable upgrade
+path if more moral-dimension coverage is wanted later; not needed for
+stage 1.
 
-```python
-TOM = {
-    "feeling":      str | None,    # lemon's read of user's feeling
-    "avoid":        str | None,    # what NOT to do
-    "what_helps":   str | None,    # what to do
-    "confidence":   float,          # NEW: how confident lemon is (for divergence tracking)
-}
-```
+**PAD over PANAS / categorical-only.** PAD is continuous (smooth
+nudging, matches the "subtle nudges only" prompt discipline), three-
+dimensional (the dominance axis captures "in control vs at the mercy
+of things" — directly relevant for empathy), and is the dominant
+choice in computational affective agents (used in ALMA, in animated
+character systems, in PAD-based emotional contagion models). PANAS
+misses dominance entirely and its two axes (PA, NA) only cover one of
+four variants of positive/negative affect each. Pure categorical mood
+labels can't blend continuously and don't compose under nudging.
 
-Stays as **lemon's model of user_state**, not the user_state itself.
-When ToM and user_state diverge, that's signal: lemon misread, and the
-divergence can drive a self-correction loop in future turns.
+**Categorical mood label derived from PAD.** Keep a small whitelisted
+label set (e.g. `neutral, calm, content, happy, excited, anxious, low,
+tense, tired, frustrated`) for prompt readability — but compute it as
+a function of PAD coordinates, not as a separate primary
+representation. The LLM reads the label like a friend reads a vibe;
+the PAD coordinates underneath give the system smooth dynamics.
 
-### 6.5 Where each lives in storage
+**Free-form adaptations (with structured slots).** `current_goals`,
+`values`, `concerns`, `relational_stance` are short strings. Could be
+Schwartz-tagged later (achievement, benevolence, etc., 10 universal
+values). For stage 1, free-form is more flexible and matches lemon's
+existing fact-storage style.
+
+**Phasic emotion stays separate.** The 23-label categorical event
+(already implemented in `empathy/emotion.py`) is the *input* that
+nudges layer 3. Don't merge them — phasic and tonic operate on
+different timescales, and conflating them was the original design
+muddle this whole proposal exists to fix.
+
+### 6.4 The trait–state bridge: Whole Trait Theory
+
+Fleeson's Whole Trait Theory (2001, refined 2015 and 2025) gives the
+clean theoretical link between traits and states: **traits are density
+distributions of states**. A trait of "extraversion = 0.6" means the
+agent's typical extraversion across daily life is centred around 0.6,
+with a spread that's also a stable individual difference. State
+fluctuates day-to-day and turn-to-turn within that trait-shaped
+distribution.
+
+For lemon's dynamics:
+
+- Phasic event → state nudge (clamped magnitude per turn).
+- State drifts back toward a trait-defined home range over time
+  (mean-reversion).
+- Trait nudges per turn are tiny (≤0.02) — essentially frozen.
+- Adaptations evolve at a third rate: more responsive than traits, less
+  responsive than state.
+
+This is what makes the state layer *honest* rather than reactive: state
+moves, but it's anchored to the trait distribution underneath.
+
+### 6.5 Theory of mind: still separate, still distinct from user_state
+
+ToM is **lemon's *model* of user_state**, not user_state itself. Same
+shape (or a subset), different epistemic status. When ToM and the
+inferred user_state diverge, that's signal: lemon misread the user. In
+later stages this divergence can drive self-correction. For stage 1,
+ToM stays in its existing form (`feeling`, `avoid`, `what_helps`); the
+new user_state object lives alongside it and is fed into the response
+generation as a separate block.
+
+### 6.6 Storage layout
 
 | object | scope | persistence |
 | --- | --- | --- |
-| `lemon_tonic_state` | global | `state_snapshots`, today's table |
-| `user_tonic_state` | global (per-installation; lemon is single-user) | NEW table or new state-snapshots stream |
-| `lemon_phasic` | per turn | NEW column on messages, or separate per-turn log |
-| `user_phasic` | per turn | already on `messages` (emotion, intensity, salience) |
-| `tom` | per turn | NEW or store with phasic |
+| `lemon_state` (today's `internal_state`) | single-user | `state_snapshots` table — UNCHANGED in stage 1 |
+| `user_state` (NEW, three layers) | single-user | NEW `user_state_snapshots` table |
+| `lemon_traits` & `lemon_adaptations` | static persona | constants in NEW `src/persona.py` |
+| `phasic emotion` per user turn | per-message | already in `messages.emotion`/`intensity`/`salience` columns |
+| `phasic emotion` per lemon turn | per-message | NOT IMPLEMENTED in stage 1 (lemon-side phasic is stage 2+) |
+| `tom` per turn | per-turn ephemeral | UNCHANGED — flows through pipeline trace, not persisted |
 
-For the single-user single-process design lemon currently has, "global"
-just means "the one user." If lemon were ever multi-user, all of this
-becomes per-user.
+A new `user_state_snapshots` table parallel to `state_snapshots` (rather
+than extending it with a discriminator column) keeps trajectory history
+for `/why` debugging, doesn't require backfill of existing rows, and is
+purely additive to the schema.
 
 ---
 
-## 7. Open design questions
+## 7. Design decisions (resolved for stage 1)
 
-These are the decisions that need explicit answers before any code is
-written. Some have a default lean; all need confirmation.
+The decisions below were open in earlier drafts. They are now resolved
+for stage 1 implementation. Stage 2 / 3 may revisit some of them.
 
 ### 7.1 How damped is lemon's phasic update?
 
@@ -459,87 +536,103 @@ some state; that's where the next session starts (with an optional
 "some time has passed" decay applied). This is asymmetric reset
 behaviour with the symmetric schema, and it's the right call.
 
-### 7.3 Where do the LLM round trips go?
+### 7.3 LLM round trips — RESOLVED
 
-Today: 1 pre-reply read (`user_read`), 1 reply call, 1 post-reply call
-(`post_exchange` for facts + state).
+**Decision: extend `user_read`. No new round trip.** The single
+existing pre-reply call now emits emotion + ToM + a user-state delta
+in one merged JSON response. `post_exchange` is unchanged in stage 1.
+Output JSON gets longer (modest cost) but the call count stays the
+same.
 
-Naive expansion: add user_state update + lemon pre-reply state nudge =
-two more round trips. That's 50% more latency and cost. Untenable.
+Stages 2 and 3 may add lemon-side state updates pre-reply (currently
+post-reply via `post_exchange`); whether that costs an extra call is a
+stage-2 decision.
 
-**Mitigation paths to evaluate:**
+### 7.4 Cold-start for user_state — RESOLVED
 
-- **Extend `user_read`** to also emit a user-tonic-state nudge. One
-  call covers phasic + tonic for the user.
-- **Move lemon state update into `user_read`** as well. Same call
-  emits: user phasic, user tonic nudge, lemon's read of the situation.
-  Then reply generation uses all of it. `post_exchange` shrinks to
-  just facts + lemon-state confirmation.
-- Net result: same number of LLM calls per turn, with more output
-  per call. Costs go up modestly (longer JSON output) but not
-  proportionally.
+**Decision:** initialise user_state from `DEFAULT_USER_STATE` (zeroed
+PAD, zeroed traits, empty adaptations, neutral mood label) on first
+contact. The block formatter recognises the all-zero/empty case and
+emits a degraded version ("First read of this person — let your reply
+do the inferring") to signal low confidence to the LLM. By turn 3-5,
+small per-turn nudges have populated enough of the state for the
+normal block format to take over. No special "calibration mode" flag.
 
-### 7.4 How do we infer user tonic state from messages?
+Cross-session: previous session's end-state is the new session's
+start-state. **No session-start overrides on the user side** (this is
+the §7.2 decision: a user genuinely brings their carried-in mood; not
+resetting them is the right call).
 
-Cold-start problem. First session has no prior user state to nudge
-from. Defaults from facts? From the very first user_read? From a
-lightweight "scan recent messages" pass on session start?
+### 7.5 Prompt block layout — SHIPPED stage 3
 
-**Lean:** initialise user tonic state from `DEFAULT_USER_STATE` (TBD)
-on first contact, then nudge on every read. After ~3-5 turns the noise
-should settle. Cross-session, the previous session's end-state is the
-new session's start-state.
+Final layout in the system block stack:
 
-### 7.5 Folding `<user_emotion>` and `<theory_of_mind>` into one block?
+```
+position 0: <Who you are>          (persona — cache anchor, UNTOUCHED)
+position 1: <time_context>
+position 2: <lemon_state>          (renamed from <internal_state>, three-layer schema)
+position 3: <user_facts>           (if facts exist)
 
-In the new framing, the user's *actual* phasic emotion is a state
-object. ToM is *lemon's model* of user state. These could fold into
-one ToM-shaped block in the prompt: "what I think they're feeling,
-what's been on their mind, what helps." Cleaner prompt surface, fewer
-moving parts.
+per-turn injections (in pipeline order):
+  <lemon_state>                    (re-injected with the freshly-nudged
+                                    state, AFTER read_user pass)
+  <emotional_memory>               (if memories)
+  <user_state>                     (tonic, three-layer schema)
+  <reading>                        (NEW unified block: phasic emotion + ToM)
+```
 
-**Lean: yes, fold them**, but keep the underlying objects distinct in
-storage. The prompt is a presentation layer.
+Tonic-then-phasic for both agents. `<lemon_state>` is refreshed
+twice — once via `refresh_base_blocks` from carried-in state, then
+overwritten by the pipeline with the post-nudge state — so the reply
+generator reads the updated lemon_state (this is the stage 2 ordering
+guarantee: state-first, response-second).
 
-### 7.6 What gets exposed to lemon in the system prompt?
+### 7.6 `<user_state>` block format — RESOLVED
 
-Today lemon sees `<internal_state>`, `<user_emotion>`, `<theory_of_
-mind>`, `<facts>`, `<emotional_memory>`. In the new world the natural
-arrangement is:
+**Decision:** compact prose with PAD numbers in parentheses. Not JSON.
 
-- `<lemon_state>` — lemon's own tonic state. (renamed from
-  `<internal_state>` to make the symmetry obvious)
-- `<user_state>` — lemon's model of the user's tonic state (the
-  ToM-merged block from §7.5).
-- `<event>` — what just happened, with phasic reads. Optional —
-  the user's phasic-read may be folded into `<user_state>`.
-- `<emotional_memory>`, `<facts>`, `<time_context>` — unchanged.
+Example shape:
 
-### 7.7 Schema unification vs minor renaming
+```
+<user_state>
+Background read of the person you're talking to. Lets your responses
+match where they are right now, not just the latest message. Do not
+narrate this.
 
-Should the user_state schema be *literally identical* to lemon's, with
-the same field names, or be a parallel-but-renamed schema (e.g.
-`disposition` for lemon, `stance_toward_lemon` for the user)?
+Mood: calm (pleasure +0.15, arousal -0.10, dominance 0.00)
+Roughly: somewhat agreeable, average extraversion, low neuroticism.
+On their mind: prepping for tuesday's exam.
+Cares about: family, doing well academically.
+Worries: feeling unprepared.
+How they're showing up: open, slightly tired.
+</user_state>
+```
 
-**Lean: literally identical.** Renaming feels safer but it makes the
-symmetry illegible to the LLM and to future readers. Same field names,
-documented clearly.
+Empty / cold-start case collapses to: "First read of this person —
+let your reply do the inferring."
 
-### 7.8 What does `/why` show?
+### 7.7 Schema field names — RESOLVED
 
-Currently the `/why` introspection shows the last reply's pipeline
-trace. In the new architecture it should show:
+**Decision: literally identical names** between `lemon_state` and
+`user_state`. `traits.openness`, `state.pleasure`, etc. — same shape,
+same field names. Asymmetry shows up in *dynamics* (lemon's traits
+hardcoded; lemon's state damped harder) and in *update site* (lemon
+post-reply via `post_exchange`; user pre-reply via `user_read`), not
+in structure.
 
-- Lemon's tonic state going in
-- User's tonic state going in
-- Both phasic reads
-- ToM (if separate from user_state)
-- What changed in each tonic state across the turn
-- Memories used
-- Empathy check result
+For stage 1 the lemon-side `internal_state` keeps its current 6-field
+shape — moving lemon to the new three-layer schema is stage 3. Stage 1
+ships with the user side on the new schema and lemon on the old one;
+they're not yet symmetric in field names but they ARE symmetric in
+existence (both have a persisted state object).
 
-This is a much richer debugging surface than today's trace and is one
-of the concrete wins from the refactor.
+### 7.8 `/why` enrichment — RESOLVED for stage 1
+
+**Decision:** stage 1 adds three new fields to the `/why` output:
+`user_state_before`, `user_state_after`, `user_state_delta`. The full
+trait/adaptation/PAD trajectory becomes visible. A new `/user_state`
+slash command shows the current user_state in compact form, paralleling
+the existing `/state` (lemon).
 
 ---
 
@@ -587,39 +680,93 @@ identity."
 
 ---
 
-## 9. Possible migration order (when this gets approved)
+## 9. Migration order
 
 Stage gates so the work is interruptible at each step.
 
-### Stage 1: persistent user_state object
+### Stage 1 (SHIPPED 2026-04-26): persistent user_state with three-layer schema
 
-Add `user_state` table or field. Extend `user_read` to emit a tonic-
-state nudge alongside the existing phasic emotion + ToM. Persist user
-tonic state across turns and sessions. **No reordering of the existing
-pipeline yet** — this stage just adds the missing user-side object.
+- Add `src/storage/user_state.py` with `DEFAULT_USER_STATE`, validators,
+  `apply_delta`, load/save wrappers. Mirrors the lemon-side `state.py`.
+- Add `user_state_snapshots` table via additive migration; expose
+  `latest_user_state` and `save_user_state_snapshot` from `storage/db.py`.
+- Add `src/persona.py` with `LEMON_TRAITS` (Big 5) and `LEMON_ADAPTATIONS`
+  (goals/values/concerns/stance) constants.
+- Extend `prompts.build_user_read_prompt` to accept the current
+  user_state and emit a `user_state_delta` sub-object alongside emotion
+  + ToM. Add `format_user_state_block` and `USER_STATE_TAG`.
+- Update `empathy/user_read.read_user` to return a 3-tuple `(emotion,
+  tom, user_state_delta)` with safe fallback to a zero-delta.
+- Update `pipeline.run_empathy_turn` to load/persist user_state and
+  inject the new `<user_state>` block. Extend `PipelineTrace`.
+- Wire `fresh_user_session_state` through `session_context`, `lem.py`,
+  `web.py`. Extend `ChatContext` with a `user_state` field.
+- Add `/user_state` slash command; extend `/why` with the new fields.
+- New `tests/test_user_state.py`; updates to `test_pipeline.py`,
+  `test_db.py`, `test_state.py` (the last is already broken — fix as
+  part of this stage).
+
+**No pipeline reordering** in stage 1. Lemon's existing `internal_state`
+remains as-is (6-field shape), updated post-reply. Stage 1 is purely
+*additive*.
 
 Most of the simulation value comes from this stage alone, because it
 finally gives lemon a persistent representation of "where the user
 is."
 
-### Stage 2: move lemon's state update pre-reply
+### Stage 2 (SHIPPED 2026-04-27): lemon's state update moved pre-reply
 
-Currently lemon's tonic state updates *after* the reply, in
-`post_exchange`. Move it *before* the reply, so the response generator
-reads from a freshly-updated state. `post_exchange` shrinks to just
-facts extraction + optional state confirmation.
+Lemon's tonic state nudge moved out of `post_exchange.bookkeep` (which
+ran post-reply in a background thread) and into the merged user_read
+pass that now runs pre-reply. The response generator reads from a
+*freshly-updated* lemon state on every turn, so reply tone genuinely
+reflects what lemon "feels" in response to the just-arrived message.
+`post_exchange` shrunk to facts-only.
+
+Round-trip count is unchanged: the new lemon-side delta rides along on
+the existing user_read call, which now emits four sub-objects
+(emotion, tom, user_state_delta, lemon_state_delta) in one LLM
+response. The `_clamp_lemon_delta` helper in `empathy/user_read.py`
+applies asymmetric damping on top of the standard validator (lemon's
+PAD ±0.10 vs the user's ±0.15; lemon's traits and values are frozen).
 
 This is the "state first, response second" half of the proposal.
 
-### Stage 3: schema unification + prompt-block restructure
+### Stage 3 (SHIPPED 2026-04-27): schema unification + prompt-block restructure
 
-Rename `internal_state` → `lemon_state`, introduce `user_state` block
-with the same shape, fold `<user_emotion>` + `<theory_of_mind>` into a
-single ToM-shaped block. Update `/why`.
+Lemon's runtime state migrated to the same three-layer schema as the
+user side. Concretely:
 
-This is the cosmetic-but-clarifying stage. Could happen earlier; left
-last because it's the one most likely to break tests and prompts that
-reference specific block names.
+- **New module `src/storage/lemon_state.py`** mirrors `user_state.py`,
+  built on top of `persona.LEMON_TRAITS` and `persona.LEMON_ADAPTATIONS`
+  for the static layers. PAD core affect drifts via the pre-reply nudge.
+  `fresh_lemon_session_state` re-pegs PAD to a session-start baseline
+  (`LEMON_SESSION_START_STATE`) and resets relational_stance to the
+  persona baseline; concerns and goals carry over for cross-session
+  continuity.
+- **New `lemon_state_snapshots` table** parallel to
+  `user_state_snapshots`. Migration entry (3, ...). The legacy
+  `state_snapshots` table stays as archive but gets no new writes.
+- **One-time legacy migration** (`migrate_legacy_state` in lemon_state):
+  if a fresh install finds the old 6-field state but no new shape, it
+  converts mood/energy → PAD coordinates, disposition → relational_stance,
+  emotional_thread → first concern. recent_activity is dropped on
+  migration.
+- **Prompt blocks renamed** — `<internal_state>` → `<lemon_state>`. The
+  separate `<user_emotion>` and `<theory_of_mind>` blocks fold into a
+  single `<reading>` block (per-turn phasic layer), paired with
+  `<user_state>` (per-session tonic layer). Tonic-then-phasic ordering
+  for both agents.
+- **`format_internal_state` removed**, replaced by `format_lemon_state`
+  with the same lemon-voice framing as the legacy block (mood, traits,
+  goals, concerns, stance) but rendering the new schema.
+
+The asymmetry kept: lemon's traits are hardcoded from persona constants
+and never drift; the user's traits are inferable but with `_TRAIT_NUDGE_CAP
+= 0.02` per turn they're effectively frozen too. Lemon's PAD damping
+(`±0.10`) is tighter than the user's (`±0.15`). Same schema, asymmetric
+dynamics — psychologically honest (friends are stabler than the people
+they support).
 
 ---
 
@@ -650,21 +797,33 @@ For the developer (you):
 
 ---
 
-## 11. Open thread for follow-up discussion
+## 11. Future work (post stages 1+2+3)
 
-Decisions that still need your input before any work starts:
+With the three-stage migration complete, the obvious next moves:
 
-1. Stage 1 only, or full three stages?
-2. Mood vocabulary — keep small (Option A) or Russell-derived (Option B)?
-3. Field name unification — literally identical, or rename for agent
-   clarity?
-4. Damping levels — same for both agents, or asymmetric (lemon damped
-   harder)?
-5. Cold-start handling for user_state — defaults from `facts`,
-   defaults from the first read, or hardcoded `DEFAULT_USER_STATE`?
-6. Should lemon's phasic reaction be modelled at all in stage 1, or
-   only added at stage 2?
-7. Where do the round trips land (§7.3 has options)?
+1. **Trait inference** — currently essentially frozen for the user
+   (`_TRAIT_NUDGE_CAP = 0.02` per turn). As session count grows,
+   periodic trait re-estimation from accumulated message history
+   becomes worthwhile, probably monthly-cadence or every-N-sessions
+   in a separate offline pass.
+2. **HEXACO upgrade** — adding Honesty-Humility as a sixth trait
+   dimension. Cheap; mostly a constant swap.
+3. **Schwartz-tagged values** — replace free-form `values` strings
+   with tagged entries from Schwartz's 10-value taxonomy for better
+   retrievability.
+4. **ToM ↔ user_state divergence signal** — when lemon's per-turn
+   ToM read in the `<reading>` block differs from the inferred
+   `<user_state>`, treat it as a signal lemon misread; feed back
+   into the next-turn prompt.
+5. **Phasic-event-to-PAD mapping** — currently the LLM emits PAD
+   nudges directly. A hardcoded affect→PAD mapping table per emotion
+   label could be a faster / cheaper path with comparable signal.
+6. **Lemon-side phasic events** — lemon currently has tonic state
+   updated each turn but no explicit phasic event. A per-turn lemon
+   reaction object (analogous to the user's emotion classification)
+   could let `<reading>` show lemon's reaction alongside the user's.
+7. **Drop the legacy `state_snapshots` table** — once the migration
+   has been live long enough, the archive is no longer interesting.
 
 ---
 
@@ -708,18 +867,86 @@ Decisions that still need your input before any work starts:
   in the Context of Mental Health: Systematic Review.* JMIR Mental
   Health, 2024. https://mental.jmir.org/2024/1/e58974
 
-### Foundational psychology referenced
+### Personality models (trait layer)
+
+- McAdams & Pals. *A new Big Five: Fundamental principles for an
+  integrative science of personality.* American Psychologist, 2006.
+  (The three-level integration: traits, characteristic adaptations,
+  narrative identity.)
+- Carvalho. *Understanding Personality Stability and Change From
+  McAdams's Perspective.* Social and Personality Psychology Compass,
+  2025. https://compass.onlinelibrary.wiley.com/doi/abs/10.1111/spc3.70114
+- Costa & McCrae. NEO-PI-R / Five-Factor Model.
+- Soto & John. *The next Big Five Inventory (BFI-2).* JPSP, 2017.
+- Ashton & Lee. HEXACO model (Big 5 + Honesty-Humility).
+- Serapio-García et al. *Personality Traits in Large Language Models.*
+  2023.
+- *LLMs Simulate Big Five Personality Traits: Further Evidence.*
+  ACL personalize workshop, 2024. https://arxiv.org/abs/2402.01765
+- *The Power of Personality: A Human Simulation Perspective to
+  Investigate Large Language Model Agents.* 2025.
+  https://arxiv.org/html/2502.20859
+
+### State / mood representation
 
 - Russell. *Core affect and the psychological construction of emotion.*
   Psychological Review, 2003.
 - Mehrabian & Russell. *An approach to environmental psychology.*
-  1974. (PAD model.)
+  1974. (PAD model: Pleasure-Arousal-Dominance.)
+- Mehrabian. *Pleasure-arousal-dominance: A general framework for
+  describing and measuring individual differences in temperament.*
+  Current Psychology, 1996.
+  https://link.springer.com/article/10.1007/BF02686918
 - Watson, Clark, Tellegen. *Development and validation of brief
   measures of positive and negative affect: the PANAS scales.* JPSP,
   1988.
+- Gehm & Scherer. PAD vs PANAS comparison for differentiating affect.
+  https://link.springer.com/article/10.1007/BF02229025
+- Gebhard. *ALMA: A Layered Model of Affect.* AAMAS 2005.
+  https://www.researchgate.net/publication/221455945_ALMA_a_layered_model_of_affect
+- *From Affect Theoretical Foundations to Computational Models of
+  Intelligent Affective Agents.* MDPI Applied Sciences, 2021.
+  https://www.mdpi.com/2076-3417/11/22/10874
+
+### State-trait integration
+
+- Fleeson. *Toward a structure- and process-integrated view of
+  personality: traits as density distributions of states.* JPSP, 2001.
+  https://pubmed.ncbi.nlm.nih.gov/11414368/
+- Fleeson & Jayawickreme. *Whole Trait Theory.* JRP, 2015.
+  https://pmc.ncbi.nlm.nih.gov/articles/PMC4472377/
+- Fleeson & Jayawickreme. *Getting from states to traits: Whole Trait
+  Theory's explanatory and developmental engine.* European Journal of
+  Personality, 2025.
+  https://journals.sagepub.com/doi/10.1177/08902070251366709
+
+### Critique of weaker personality models
+
+- Pittenger. *Measuring the MBTI… and coming up short.* JCPE, 1993.
+- Randall et al. *Validity and Reliability of the Myers-Briggs
+  Personality Type Indicator: A Systematic Review.* 2017.
+  https://gwern.net/doc/psychology/personality/2017-randall.pdf
+- Hook et al. *The Enneagram: A systematic review of the literature
+  and directions for future research.* JCP, 2021.
+  https://pubmed.ncbi.nlm.nih.gov/33332604/
+- *Personality Tests Aren't All the Same.* Scientific American.
+  https://www.scientificamerican.com/article/personality-tests-arent-all-the-same-some-work-better-than-others/
+
+### Discrete emotion vocabularies (phasic layer)
+
 - Tracy & Robins. *Putting the self into self-conscious emotions: A
   theoretical model.* Psychological Inquiry, 2004. (Pride / shame /
   guilt / embarrassment cluster — see also `emotion.py` docstring.)
+- Demszky et al. *GoEmotions.* 2020. (27-label vocabulary that lemon's
+  23-label set was derived from.)
+
+### Values / characteristic adaptations
+
+- Schwartz. *Universals in the content and structure of values.* 1992.
+  (10 universal values.)
+- Deci & Ryan. Self-Determination Theory (autonomy / competence /
+  relatedness as basic psychological needs).
+- Emmons. *Personal strivings* (goal-based personality).
 
 ### Internal references
 

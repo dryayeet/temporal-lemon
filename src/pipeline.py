@@ -28,16 +28,28 @@ from logging_setup import get_logger, preview
 from prompt_stack import compress_history
 from prompts import (
     CRITIQUE_TAG,
-    EMOTION_TAG,
+    LEMON_STATE_TAG,
     MEMORY_TAG,
-    TOM_TAG,
+    READING_TAG,
+    USER_STATE_TAG,
     format_critique_block,
-    format_emotion_block,
+    format_lemon_state,
     format_memory_block,
-    format_tom_block,
+    format_reading_block,
+    format_user_state_block,
 )
 from storage import db
+from storage.lemon_state import (
+    DEFAULT_LEMON_STATE,
+    apply_delta as apply_lemon_state_delta,
+    save_lemon_state,
+)
 from storage.memory import relevant_memories
+from storage.user_state import (
+    DEFAULT_USER_STATE,
+    apply_delta as apply_user_state_delta,
+    save_user_state,
+)
 
 log = get_logger("pipeline")
 
@@ -65,6 +77,14 @@ class PipelineTrace:
     final: Optional[str] = None
     pipeline_used: bool = False
     facts_extracted: dict = field(default_factory=dict)
+    # Dyadic-state stage 1: user_state trajectory across this turn.
+    user_state_before: Optional[dict] = None
+    user_state_after: Optional[dict] = None
+    user_state_delta: Optional[dict] = None
+    # Dyadic-state stage 2 + 3: lemon_state trajectory across this turn.
+    lemon_state_before: Optional[dict] = None
+    lemon_state_after: Optional[dict] = None
+    lemon_state_delta: Optional[dict] = None
 
 
 def _last_leading_system_index(history: list[dict]) -> int:
@@ -100,17 +120,25 @@ def run_empathy_turn(
     session_id: Optional[int] = None,
     keep_recent_turns: Optional[int] = None,
     on_phase: Optional[Callable[[str], None]] = None,
+    user_state: Optional[dict] = None,
+    lemon_state: Optional[dict] = None,
 ) -> tuple[str, PipelineTrace]:
     """Run the empathy pipeline for one user message. Returns (final_reply, trace).
 
-    `base_history` should contain the refreshed time/state/facts system blocks
-    AND the prior conversation. It must NOT yet include `user_msg` — the pipeline
-    appends it after running the pre-generation passes.
+    `base_history` should contain the refreshed time/lemon_state/facts system
+    blocks AND the prior conversation. It must NOT yet include `user_msg` —
+    the pipeline appends it after running the pre-generation passes.
 
-    The pipeline does not mutate `base_history`. Caller appends user_msg and the
-    final reply to its own history after this returns.
+    The pipeline does not mutate `base_history`. Caller appends user_msg and
+    the final reply to its own history after this returns.
 
     `on_phase` is an optional callback for surfacing progress (used by web SSE).
+
+    `user_state` and `lemon_state` are the persistent tonic states going INTO
+    this turn. The pipeline reads them, has the LLM emit per-turn deltas
+    against them (in the merged user_read pass), applies and persists both,
+    then conditions reply generation on the freshly-updated states. The
+    trajectory is reported on the trace.
     """
     trace = PipelineTrace()
     keep_recent_turns = keep_recent_turns or config.KEEP_RECENT_TURNS
@@ -144,17 +172,49 @@ def run_empathy_turn(
     trace.pipeline_used = True
     recent = recent_messages_for_context(base_history)
 
-    # ---------- 1. merged read: emotion + theory-of-mind in one call ----------
+    # Dyadic-state: tonic states for both agents going INTO this turn.
+    user_state_before = user_state if user_state is not None else dict(DEFAULT_USER_STATE)
+    lemon_state_before = lemon_state if lemon_state is not None else dict(DEFAULT_LEMON_STATE)
+    trace.user_state_before = user_state_before
+    trace.lemon_state_before = lemon_state_before
+
+    # ---------- 1. merged read: emotion + ToM + user-delta + lemon-delta ----------
     if on_phase:
         on_phase(PHASE_READING)
     phase_started = time.time()
-    emotion, tom = read_user(user_msg, recent_msgs=recent, model=model)
-    log.info(
-        "phase=reading elapsed_ms=%d emotion=%s",
-        int((time.time() - phase_started) * 1000), emotion.get("primary"),
+    emotion, tom, user_state_delta, lemon_state_delta = read_user(
+        user_msg,
+        recent_msgs=recent,
+        current_user_state=user_state_before,
+        current_lemon_state=lemon_state_before,
+        model=model,
     )
+    user_state_after = apply_user_state_delta(user_state_before, user_state_delta)
+    lemon_state_after = apply_lemon_state_delta(lemon_state_before, lemon_state_delta)
     trace.emotion = emotion
     trace.tom = tom
+    trace.user_state_delta = user_state_delta
+    trace.user_state_after = user_state_after
+    trace.lemon_state_delta = lemon_state_delta
+    trace.lemon_state_after = lemon_state_after
+    log.info(
+        "phase=reading elapsed_ms=%d emotion=%s user_mood=%s lemon_mood=%s",
+        int((time.time() - phase_started) * 1000),
+        emotion.get("primary"),
+        user_state_after.get("state", {}).get("mood_label"),
+        lemon_state_after.get("state", {}).get("mood_label"),
+    )
+
+    # Persist both tonic states immediately. A crash during retrieval/generation
+    # still preserves the read. Fire-and-forget; failures don't break the turn.
+    try:
+        save_user_state(user_state_after, session_id=session_id)
+    except Exception as e:
+        log.warning("user_state_save_failed error=%r", e)
+    try:
+        save_lemon_state(lemon_state_after, session_id=session_id)
+    except Exception as e:
+        log.warning("lemon_state_save_failed error=%r", e)
 
     # log the user message NOW with its emotion fields
     if session_id is not None:
@@ -183,15 +243,25 @@ def run_empathy_turn(
     trace.memories = memories
 
     # ---------- 3. inject blocks + draft ----------
+    # Stage 3 prompt-block layout:
+    #   persona (cache anchor), time_context, lemon_state (refreshed pre-reply),
+    #   user_facts, [emotional_memory], <user_state>, <reading>.
+    # The <lemon_state> block was refreshed in `refresh_base_blocks` from
+    # lemon_state_before; we now overwrite it with the JUST-updated
+    # lemon_state_after so reply generation reads the freshly-nudged state.
     history = list(base_history)
     blocks_injected = []
+    history = _inject_block(history, LEMON_STATE_TAG, format_lemon_state(lemon_state_after))
+    blocks_injected.append("lemon_state")
     if memories:
         history = _inject_block(history, MEMORY_TAG, format_memory_block(memories))
         blocks_injected.append("memory")
-    history = _inject_block(history, EMOTION_TAG, format_emotion_block(emotion))
-    blocks_injected.append("emotion")
-    history = _inject_block(history, TOM_TAG, format_tom_block(tom))
-    blocks_injected.append("tom")
+    # <user_state> (tonic) sits before <reading> (phasic) so the model reads
+    # tonic-then-phasic for the user, paralleling the lemon ordering.
+    history = _inject_block(history, USER_STATE_TAG, format_user_state_block(user_state_after))
+    blocks_injected.append("user_state")
+    history = _inject_block(history, READING_TAG, format_reading_block(emotion, tom))
+    blocks_injected.append("reading")
 
     history.append({"role": "user", "content": user_msg})
     pre_compress_len = len(history)

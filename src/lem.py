@@ -14,7 +14,8 @@ from pipeline import recent_messages_for_context, run_empathy_turn
 from prompts import LEMON_OPENERS
 from session_context import initial_history, refresh_base_blocks, run_bookkeeping
 from storage import db
-from storage.state import fresh_session_state, save_state
+from storage.lemon_state import fresh_lemon_session_state, save_lemon_state
+from storage.user_state import fresh_user_session_state
 
 
 def main() -> None:
@@ -27,18 +28,20 @@ def main() -> None:
 
     session_start = datetime.now()
     session_id = db.start_session()
-    internal_state = fresh_session_state()
-    save_state(internal_state, session_id=session_id)
+    lemon_state = fresh_lemon_session_state()
+    save_lemon_state(lemon_state, session_id=session_id)
+    user_state = fresh_user_session_state()
 
     ctx = ChatContext(
-        history=initial_history(internal_state, session_start),
-        internal_state=internal_state,
+        history=initial_history(lemon_state, session_start),
+        lemon_state=lemon_state,
         chat_model=CHAT_MODEL,
         session_id=session_id,
+        user_state=user_state,
     )
 
-    # Guards ctx.internal_state / ctx.history while a bookkeeping thread is
-    # mutating them in parallel with the main REPL loop.
+    # Guards ctx.lemon_state / ctx.user_state / ctx.history while the bookkeeping
+    # thread runs in parallel.
     ctx_lock = threading.Lock()
     last_bg: Optional[threading.Thread] = None
 
@@ -66,7 +69,7 @@ def main() -> None:
                 continue
 
             with ctx_lock:
-                base_history = refresh_base_blocks(ctx.history, ctx.internal_state, session_start)
+                base_history = refresh_base_blocks(ctx.history, ctx.lemon_state, session_start)
 
             try:
                 reply, trace = run_empathy_turn(
@@ -76,6 +79,8 @@ def main() -> None:
                     session_id=session_id,
                     keep_recent_turns=KEEP_RECENT_TURNS,
                     on_phase=lambda phase: print(f"  · {phase}...", flush=True),
+                    user_state=ctx.user_state,
+                    lemon_state=ctx.lemon_state,
                 )
             except (requests.RequestException, RuntimeError) as e:
                 print(f"\n[chat error: {e}]\n")
@@ -85,8 +90,13 @@ def main() -> None:
                 ctx.last_trace = trace
                 ctx.history.append({"role": "user", "content": user_input})
                 ctx.history.append({"role": "assistant", "content": reply})
+                # Pull both freshly-updated states off the trace; pipeline
+                # already persisted them. Next turn reads from these values.
+                if getattr(trace, "user_state_after", None) is not None:
+                    ctx.user_state = trace.user_state_after
+                if getattr(trace, "lemon_state_after", None) is not None:
+                    ctx.lemon_state = trace.lemon_state_after
                 recent_snapshot = recent_messages_for_context(ctx.history)
-                state_snapshot = dict(ctx.internal_state)
                 model_snapshot = ctx.chat_model
 
             print(f"lemon: {reply}\n")
@@ -95,17 +105,17 @@ def main() -> None:
                 target=run_bookkeeping,
                 args=(
                     ctx, session_id, user_input, reply, trace,
-                    recent_snapshot, state_snapshot, model_snapshot, ctx_lock,
+                    recent_snapshot, model_snapshot, ctx_lock,
                 ),
                 daemon=True,
             )
             last_bg.start()
     finally:
-        # Wait briefly for the final bookkeeping thread so its state write
-        # doesn't race the cleanup save_state below.
+        # Wait briefly for the final bookkeeping thread (facts only now;
+        # state writes happen in the pipeline already).
         if last_bg is not None and last_bg.is_alive():
             last_bg.join(timeout=10)
-        save_state(ctx.internal_state, session_id=session_id)
+        save_lemon_state(ctx.lemon_state, session_id=session_id)
         db.end_session(session_id)
 
 
