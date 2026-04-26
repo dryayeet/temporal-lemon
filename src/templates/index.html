@@ -18,6 +18,7 @@
       --bubble-lemon: #fefaea;
       --bubble-lemon-text: #2a2520;
       --bubble-system: #f3ead1;
+      --system-text: #6b4a24;
       --text: #3a2f1e;
       --muted: #a59879;
       --accent: #d4a33c;
@@ -58,10 +59,21 @@
     .bubble.you { align-self: flex-end; background: var(--bubble-you); color: var(--bubble-you-text); border-bottom-right-radius: 6px; }
     .bubble.lemon { align-self: flex-start; background: var(--bubble-lemon); color: var(--bubble-lemon-text); border-bottom-left-radius: 6px; }
     .bubble.system {
-      align-self: center; background: var(--bubble-system); color: var(--muted);
+      align-self: center; background: var(--bubble-system); color: var(--system-text);
       font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
       max-width: 90%; white-space: pre-wrap;
+      position: relative; padding-right: 36px;
     }
+    .bubble.system .system-toggle {
+      position: absolute; top: 6px; right: 8px;
+      background: none; border: none; color: var(--system-text);
+      cursor: pointer; font: inherit; font-size: 14px; line-height: 1;
+      padding: 2px 6px; border-radius: 4px; opacity: 0.6;
+      transition: opacity 0.15s, background 0.15s;
+    }
+    .bubble.system .system-toggle:hover { opacity: 1; background: var(--border); }
+    .bubble.system.collapsed { padding: 6px 36px 6px 12px; }
+    .bubble.system.collapsed .system-content { display: none; }
     .typing { align-self: flex-start; color: var(--muted); font-style: italic; padding: 4px 14px; display: flex; align-items: center; gap: 8px; }
     .typing .phase-label { transition: opacity 0.25s ease; display: inline-block; }
     .typing .phase-label.swapping { opacity: 0; transform: translateY(-2px); }
@@ -111,6 +123,7 @@
       --bubble-lemon: #2a2419;
       --bubble-lemon-text: #f5ecd3;
       --bubble-system: #20180d;
+      --system-text: #a8957a;
       --text: #f5ecd3;
       --muted: #a8957a;
       --accent: #e8c872;
@@ -187,7 +200,27 @@
       const cls = role === "user" ? "you" : role === "assistant" ? "lemon" : "system";
       const div = document.createElement("div");
       div.className = "bubble " + cls;
-      div.textContent = text;
+      if (cls === "system") {
+        const content = document.createElement("span");
+        content.className = "system-content";
+        content.textContent = text;
+        const toggle = document.createElement("button");
+        toggle.className = "system-toggle";
+        toggle.type = "button";
+        toggle.textContent = "x";
+        toggle.title = "collapse";
+        toggle.setAttribute("aria-label", "collapse");
+        toggle.onclick = () => {
+          const collapsed = div.classList.toggle("collapsed");
+          toggle.textContent = collapsed ? "-" : "x";
+          toggle.title = collapsed ? "expand" : "collapse";
+          toggle.setAttribute("aria-label", collapsed ? "expand" : "collapse");
+        };
+        div.appendChild(content);
+        div.appendChild(toggle);
+      } else {
+        div.textContent = text;
+      }
       messagesEl.appendChild(div);
       messagesEl.scrollTop = messagesEl.scrollHeight;
       return div;
