@@ -77,19 +77,23 @@ stay close, leaving room for recency / intensity / emotion to break the tie.
 | different label, same family                  | 0.5    |
 | different family, or either is `neutral`      | 0.0    |
 
-Family map (`empathy/emotion.EMOTION_FAMILIES`) — based on Plutchik / GoEmotions
-clusters:
+Family map (`empathy/emotion.EMOTION_FAMILIES`). Sad / anger / fear follow
+Shaver et al.'s prototype hierarchy; the self-conscious cluster follows
+Tracy & Robins (shared self-representation substrate, which is why pride
+groups with shame/guilt despite the opposite valence); positive is PANAS
+high-valence; low-arousal and exploratory are kept separate from the basic
+emotions so they don't confer mood-congruence on sad-cluster memories.
 
-| family       | labels                                                     |
-| ------------ | ---------------------------------------------------------- |
-| `positive`   | joy, excitement, love, gratitude, amused                   |
-| `sad`        | sadness, loneliness, disappointment, grief                 |
-| `anger`      | anger, frustration, annoyance                              |
-| `fear`       | fear, anxiety, confusion                                   |
-| `shame`      | shame, embarrassment, guilt                                |
-| `low_arousal`| tired                                                      |
-| `exploratory`| curious                                                    |
-| `neutral`    | neutral                                                    |
+| family            | labels                                                |
+| ----------------- | ----------------------------------------------------- |
+| `positive`        | joy, excitement, love, gratitude, relief, amused      |
+| `sad`             | sadness, loneliness, disappointment, grief            |
+| `anger`           | anger, frustration, annoyance                         |
+| `fear`            | fear, anxiety, confusion                              |
+| `self_conscious`  | shame, embarrassment, guilt, pride                    |
+| `low_arousal`     | tired                                                 |
+| `exploratory`     | curious                                               |
+| `neutral`         | neutral                                               |
 
 Why neutral never scores: every turn is mostly neutral, so neutral×neutral
 matching would dominate the bonus and defeat its purpose.

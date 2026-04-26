@@ -9,8 +9,18 @@ formatter and the `EMOTION_LABELS` whitelist live in `prompts.py`.
 together (sad/lonely/grief, anger/frustration, etc.) so the memory
 retriever can give a partial mood-congruence boost when the current
 label and a past label share a family without being identical.
-Grouping follows the valence/family conventions used in the empathy
-literature (Plutchik wheel, GoEmotions cluster maps).
+
+Grounding for the families: the `sad`, `anger`, and `fear` clusters
+follow Shaver, Schwartz, Kirson & O'Connor's (1987) prototype
+hierarchy. The `self_conscious` cluster (shame, embarrassment, guilt,
+pride) follows Tracy & Robins on the self-conscious emotions, which
+require self-representation and are categorically distinct from
+Ekman-style basic emotions. `positive` groups joy/excitement/love/
+gratitude/relief/amused along the high-valence axis (PANAS / Watson &
+Clark). `low_arousal` (tired) is an affect/state rather than a basic
+emotion — kept separate so it never confers mood-congruence on
+sad-cluster memories. `exploratory` (curious) is an epistemic state
+(Litman, Kashdan).
 """
 import json
 
@@ -30,13 +40,14 @@ DEFAULT_EMOTION = {
 EMOTION_FAMILIES: dict[str, str] = {
     # neutral
     "neutral":         "neutral",
-    # positive valence
+    # positive valence (PANAS high-valence)
     "joy":             "positive",
     "excitement":      "positive",
     "love":            "positive",
     "gratitude":       "positive",
+    "relief":          "positive",
     "amused":          "positive",
-    # sadness cluster
+    # sadness cluster (Shaver et al. prototype hierarchy)
     "sadness":         "sad",
     "loneliness":      "sad",
     "disappointment":  "sad",
@@ -49,11 +60,14 @@ EMOTION_FAMILIES: dict[str, str] = {
     "fear":            "fear",
     "anxiety":         "fear",
     "confusion":       "fear",
-    # self-conscious cluster
-    "shame":           "shame",
-    "embarrassment":   "shame",
-    "guilt":           "shame",
-    # arousal-only
+    # self-conscious cluster (Tracy & Robins) — shared self-representation
+    # substrate is what makes pride cluster with shame/guilt despite the
+    # opposite valence.
+    "shame":           "self_conscious",
+    "embarrassment":   "self_conscious",
+    "guilt":           "self_conscious",
+    "pride":           "self_conscious",
+    # arousal/epistemic states (not basic emotions)
     "tired":           "low_arousal",
     "curious":         "exploratory",
 }

@@ -276,16 +276,22 @@ Past moments when they felt similar things. Quietly informs your current read of
 # 7. USER EMOTION BLOCK
 # =============================================================================
 
-# Label set inspired by GoEmotions but trimmed to what's discriminable in
-# friend-chat context. The classifier is asked to pick one. Lives here so
-# the classifier prompt and the validator (empathy/emotion.py) read from
-# the same source.
+# Label set drawn from GoEmotions (Demszky et al. 2020), with the
+# clinically-validated fear/anxiety split (Barlow, LeDoux), the full
+# self-conscious cluster from Tracy & Robins (shame, embarrassment, guilt,
+# pride), and `relief` for the post-stress release case (Sweeny & Vohs).
+# `tired` is an arousal/affect state rather than a basic emotion — kept here
+# because users say "i'm tired" constantly and forcing it into `sadness`
+# would be wrong; the family map below puts it in its own `low_arousal`
+# bucket so it doesn't pollute mood-congruence retrieval. The classifier
+# is asked to pick one. Lives here so the classifier prompt and the
+# validator (empathy/emotion.py) read from the same source.
 EMOTION_LABELS = [
-    "neutral", "joy", "excitement", "love", "gratitude",
+    "neutral", "joy", "excitement", "love", "gratitude", "relief",
     "sadness", "loneliness", "disappointment", "grief",
     "anger", "frustration", "annoyance",
     "fear", "anxiety", "confusion",
-    "shame", "embarrassment", "guilt",
+    "shame", "embarrassment", "guilt", "pride",
     "tired", "amused", "curious",
 ]
 
