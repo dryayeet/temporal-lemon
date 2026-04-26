@@ -29,3 +29,6 @@ logs/
 #graphs
 graphify-out/
 ChatGPT Image Apr 26, 2026, 01_15_12 AM.png
+
+# standalone scratchpad scripts (one-off demos, not part of the shipped product)
+standalone/
