@@ -1,15 +1,21 @@
+"""Tests for `empathy/emotion.py` + the related reading-block formatter.
+
+`classify_emotion` was retired when emotion + ToM merged into the single
+`empathy/user_read.read_user` round-trip; that flow is covered by mocks in
+`test_pipeline.py`. `format_emotion_block` was folded into
+`format_reading_block` (the unified phasic block) in `prompts/__init__.py`.
+
+What's still in `empathy/emotion.py`: the schema validator (`_validate`),
+the JSON parser (`_parse`), and the family map for mood-congruent retrieval
+(`family_of`, `emotion_relatedness`). Those are tested here.
+"""
 import json
 
 import pytest
-import requests
 
 from empathy import emotion
-from empathy.emotion import (
-    DEFAULT_EMOTION,
-    EMOTION_LABELS,
-    classify_emotion,
-    format_emotion_block,
-)
+from empathy.emotion import EMOTION_FAMILIES, emotion_relatedness, family_of
+from prompts import EMOTION_LABELS, format_reading_block
 
 
 # ---------- _parse ----------
@@ -73,95 +79,82 @@ def test_parse_rejects_non_object():
         emotion._parse("[1, 2, 3]")
 
 
-# ---------- format_emotion_block ----------
+# ---------- family map ----------
 
-def test_format_includes_primary_and_intensity():
-    out = format_emotion_block({
-        "primary": "sadness", "intensity": 0.7,
-        "underlying_need": "be heard", "undertones": ["loneliness"],
-    })
-    assert "<user_emotion>" in out
-    assert "sadness" in out
-    assert "be heard" in out
-    assert "loneliness" in out
+def test_every_label_has_a_family():
+    assert set(EMOTION_LABELS) == set(EMOTION_FAMILIES)
 
 
-def test_format_handles_missing_fields():
-    out = format_emotion_block({"primary": "neutral", "intensity": 0.1})
-    assert "neutral" in out
-    assert "unclear" in out  # null underlying_need
-    assert "none" in out     # empty undertones
+def test_pride_in_self_conscious_cluster():
+    """Tracy & Robins: pride shares the self-representation substrate
+    with shame/guilt/embarrassment despite the opposite valence."""
+    assert family_of("pride") == "self_conscious"
+    assert family_of("shame") == "self_conscious"
 
 
-def test_format_intensity_word_buckets():
-    assert "mild" in format_emotion_block({"primary": "joy", "intensity": 0.1})
-    assert "moderate" in format_emotion_block({"primary": "joy", "intensity": 0.4})
-    assert "strong" in format_emotion_block({"primary": "joy", "intensity": 0.7})
-    assert "very strong" in format_emotion_block({"primary": "joy", "intensity": 0.95})
+def test_relief_in_positive_cluster():
+    assert family_of("relief") == "positive"
 
 
-# ---------- classify_emotion (HTTP mocked) ----------
-
-class _FakeResponse:
-    def __init__(self, payload, status=200):
-        self._payload = payload
-        self.status_code = status
-        self.text = json.dumps(payload) if isinstance(payload, dict) else str(payload)
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            err = requests.HTTPError(f"{self.status_code}")
-            err.response = self
-            raise err
-
-    def json(self):
-        return self._payload
+def test_relatedness_same_label_is_one_except_neutral():
+    assert emotion_relatedness("sadness", "sadness") == 1.0
+    # Neutral exact-match doesn't count — every turn is mostly neutral.
+    assert emotion_relatedness("neutral", "neutral") == 0.0
 
 
-def test_classify_happy_path(monkeypatch):
-    fake_emotion = {"primary": "anger", "intensity": 0.8, "undertones": []}
-    fake_payload = {"choices": [{"message": {"content": json.dumps(fake_emotion)}}]}
-    monkeypatch.setattr(emotion.requests, "post", lambda *a, **kw: _FakeResponse(fake_payload))
-
-    out = classify_emotion("I'm furious about this", recent_msgs=[])
-    assert out["primary"] == "anger"
-    assert out["intensity"] == 0.8
+def test_relatedness_same_family_is_half():
+    assert emotion_relatedness("sadness", "loneliness") == 0.5
+    assert emotion_relatedness("anger", "frustration") == 0.5
+    assert emotion_relatedness("pride", "shame") == 0.5    # self-conscious cluster
 
 
-def test_classify_returns_default_on_http_error(monkeypatch):
-    monkeypatch.setattr(
-        emotion.requests, "post",
-        lambda *a, **kw: _FakeResponse({"error": "boom"}, status=500),
+def test_relatedness_different_family_is_zero():
+    assert emotion_relatedness("joy", "anger") == 0.0
+    assert emotion_relatedness("tired", "sadness") == 0.0  # low_arousal vs sad
+
+
+def test_relatedness_neutral_never_scores():
+    assert emotion_relatedness("neutral", "joy") == 0.0
+    assert emotion_relatedness("sadness", "neutral") == 0.0
+
+
+# ---------- format_reading_block (unified phasic block) ----------
+
+def test_reading_block_includes_emotion_and_tom():
+    out = format_reading_block(
+        emotion={"primary": "sadness", "intensity": 0.7,
+                 "underlying_need": "be heard",
+                 "undertones": ["loneliness"]},
+        tom={"feeling": "tired and let down",
+             "avoid": "don't jump to advice",
+             "what_helps": "stay with it"},
     )
-    assert classify_emotion("hi") == DEFAULT_EMOTION
+    assert "<reading>" in out
+    assert "sadness" in out
+    assert "loneliness" in out
+    assert "be heard" in out
+    assert "tired and let down" in out
+    assert "advice" in out
+    assert "stay with it" in out
 
 
-def test_classify_returns_default_on_bad_json(monkeypatch):
-    fake = {"choices": [{"message": {"content": "not json"}}]}
-    monkeypatch.setattr(emotion.requests, "post", lambda *a, **kw: _FakeResponse(fake))
-    assert classify_emotion("hi") == DEFAULT_EMOTION
+def test_reading_block_intensity_word_buckets():
+    def block_for(intensity):
+        return format_reading_block(
+            {"primary": "joy", "intensity": intensity, "undertones": []},
+            {"feeling": None, "avoid": None, "what_helps": None},
+        )
+    assert "mild" in block_for(0.1)
+    assert "moderate" in block_for(0.4)
+    assert "strong" in block_for(0.7)
+    assert "very strong" in block_for(0.95)
 
 
-def test_classify_returns_default_on_request_exception(monkeypatch):
-    def raising_post(*a, **kw):
-        raise requests.ConnectionError("network down")
-    monkeypatch.setattr(emotion.requests, "post", raising_post)
-    assert classify_emotion("hi") == DEFAULT_EMOTION
-
-
-def test_classify_passes_recent_msgs_into_prompt(monkeypatch):
-    captured = {}
-    def fake_post(*a, **kw):
-        captured["body"] = kw.get("json", {})
-        return _FakeResponse({"choices": [{"message": {"content": json.dumps({
-            "primary": "neutral", "intensity": 0.1
-        })}}]})
-    monkeypatch.setattr(emotion.requests, "post", fake_post)
-
-    classify_emotion("now what?", recent_msgs=[
-        {"role": "user", "content": "earlier message"},
-        {"role": "assistant", "content": "earlier reply"},
-    ])
-    prompt_text = captured["body"]["messages"][0]["content"]
-    assert "earlier message" in prompt_text
-    assert "earlier reply" in prompt_text
+def test_reading_block_handles_null_tom_fields():
+    out = format_reading_block(
+        {"primary": "neutral", "intensity": 0.1, "undertones": []},
+        {"feeling": None, "avoid": None, "what_helps": None},
+    )
+    # Doesn't crash; renders 'unclear' / '(no specific guidance)' fallbacks
+    assert "neutral" in out
+    assert "unclear" in out

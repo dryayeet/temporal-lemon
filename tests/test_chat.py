@@ -1,5 +1,13 @@
-import config
-from llm.chat import humanize_delay, prepare_messages
+"""Tests for `llm/chat.py`.
+
+`humanize_delay` and `HUMANIZE_STREAM` were removed when streaming pacing was
+dropped from the chat call (the web UI now buffers a full reply for the
+empathy post-check before delivering it as a single SSE token event). The
+prepare_messages tests still apply — Anthropic-style cache_control wrapping
+on the persona block is unchanged.
+"""
+from core import config
+from llm.chat import prepare_messages
 
 
 # ---------- prepare_messages ----------
@@ -37,33 +45,9 @@ def test_prepare_only_wraps_persona_not_other_system_blocks(monkeypatch):
     monkeypatch.setattr(config, "ENABLE_PROMPT_CACHE", True)
     history = [
         {"role": "system", "content": "<time_context>x</time_context>"},
-        {"role": "system", "content": "<internal_state>x</internal_state>"},
+        {"role": "system", "content": "<lemon_state>x</lemon_state>"},
     ]
     out = prepare_messages(history)
     # neither has the persona tag → both stay as plain strings
     for msg in out:
         assert isinstance(msg["content"], str)
-
-
-# ---------- humanize_delay ----------
-
-def test_humanize_returns_zero_when_disabled(monkeypatch):
-    monkeypatch.setattr(config, "HUMANIZE_STREAM", False)
-    assert humanize_delay("hi", "medium") == 0.0
-
-
-def test_humanize_low_energy_is_slower_than_high(monkeypatch):
-    monkeypatch.setattr(config, "HUMANIZE_STREAM", True)
-    # average over many samples to wash out jitter
-    n = 200
-    low = sum(humanize_delay("a", "low") for _ in range(n)) / n
-    high = sum(humanize_delay("a", "high") for _ in range(n)) / n
-    assert low > high
-
-
-def test_humanize_punctuation_adds_extra_pause(monkeypatch):
-    monkeypatch.setattr(config, "HUMANIZE_STREAM", True)
-    n = 200
-    plain = sum(humanize_delay("a", "medium") for _ in range(n)) / n
-    after_period = sum(humanize_delay("a.", "medium") for _ in range(n)) / n
-    assert after_period > plain

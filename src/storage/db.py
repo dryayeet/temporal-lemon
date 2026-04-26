@@ -369,6 +369,34 @@ def find_recent_user_messages(
     return [dict(r) for r in rows]
 
 
+def session_messages(session_id: int, path: Optional[Path] = None) -> list[dict]:
+    """Return every message in `session_id`, ordered oldest-first.
+
+    Mostly used by tests + introspection (the web /history endpoint reads
+    from in-memory ChatContext, not from the DB).
+    """
+    with connect(path) as c:
+        rows = c.execute(
+            "SELECT id, session_id, role, content, created_at, emotion, intensity, salience "
+            "FROM messages WHERE session_id = ? ORDER BY id",
+            (session_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def find_recent_messages(limit: int = 20, path: Optional[Path] = None) -> list[dict]:
+    """Most recent messages across all sessions, newest first. Includes
+    both user and assistant rows (compare to `find_recent_user_messages`,
+    which is user-only and is the fallback path for memory retrieval)."""
+    with connect(path) as c:
+        rows = c.execute(
+            "SELECT id, session_id, role, content, created_at, emotion, intensity, salience "
+            "FROM messages ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ---------- state snapshots ----------
 
 def latest_state(path: Optional[Path] = None) -> Optional[dict]:
@@ -478,4 +506,14 @@ def delete_fact(key: str, path: Optional[Path] = None) -> bool:
         cur = c.execute("DELETE FROM facts WHERE key = ?", (key,))
         deleted = cur.rowcount > 0
         log.info("fact_delete key=%s deleted=%s", key, deleted)
+        return deleted
+
+
+def clear_facts(path: Optional[Path] = None) -> int:
+    """Wipe every row in the `facts` table. Returns the number of rows
+    removed. Used by tests and by any future "forget everything" command."""
+    with connect(path) as c:
+        cur = c.execute("DELETE FROM facts")
+        deleted = cur.rowcount
+        log.info("facts_clear deleted=%d", deleted)
         return deleted

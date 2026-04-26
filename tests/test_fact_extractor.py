@@ -1,13 +1,21 @@
+"""Tests for `empathy/fact_extractor.py`.
+
+The standalone `extract_facts()` LLM call was retired when fact extraction
+merged into `empathy/post_exchange.bookkeep` (which now runs in a daemon
+thread post-reply). The bookkeep flow is exercised end-to-end by
+`test_pipeline.py`. The prompt builder also moved out — it lives in
+`prompts.build_bookkeep_prompt` now.
+
+What's still in `empathy/fact_extractor.py`: the `_parse` / `_validate`
+key-and-value hygiene + the dedup gate (`_reconcile_key`, `_strip_noise`)
+that prevents the LLM from inventing key mutations like
+`prajwal_sleep_status_v2`. Those are tested here.
+"""
 import json
 
 import pytest
-import requests
 
-import config
-import pipeline
-from empathy import fact_extractor
-from empathy.fact_extractor import _build_prompt, _parse, extract_facts
-from storage import db
+from empathy.fact_extractor import _parse, _reconcile_key, _strip_noise, _validate
 
 
 # ---------- _parse ----------
@@ -34,14 +42,13 @@ def test_parse_rejects_non_object():
 
 def test_parse_drops_invalid_key_chars():
     raw = json.dumps({"Exam Date": "tuesday", "1st_exam": "wed", "ok_key": "yes"})
-    # "Exam Date" has a space (invalid), "1st_exam" starts with a digit (invalid)
+    # "Exam Date" has a space; "1st_exam" starts with a digit.
     assert _parse(raw, max_new=3) == {"ok_key": "yes"}
 
 
-def test_parse_drops_uppercase_key():
+def test_parse_lowercases_uppercase_key():
     raw = json.dumps({"CITY": "Bangalore"})
-    # uppercase not allowed; we lowercase before validating, so this actually passes
-    # but we also want to confirm the normalized key form ends up lowercase
+    # Validator lowercases keys before applying the regex check.
     assert _parse(raw, max_new=3) == {"city": "Bangalore"}
 
 
@@ -71,178 +78,64 @@ def test_parse_coerces_numeric_value_to_string():
     assert _parse(raw, max_new=3) == {"age": "25"}
 
 
-# ---------- _build_prompt ----------
+# ---------- _validate (when existing_keys is provided, dedup kicks in) ----------
 
-def test_prompt_includes_all_inputs():
-    prompt = _build_prompt(
-        user_msg="my exam is on tuesday",
-        bot_reply="oh that's soon, you prepping?",
-        existing_facts={"city": "Bangalore"},
-        recent_msgs=[
-            {"role": "user", "content": "earlier stuff"},
-            {"role": "assistant", "content": "earlier reply"},
-        ],
-        max_new=3,
-    )
-    assert "my exam is on tuesday" in prompt
-    assert "oh that's soon" in prompt
-    assert "city: Bangalore" in prompt
-    assert "earlier stuff" in prompt
-    assert "earlier reply" in prompt
-    assert "at most 3" in prompt
+def test_validate_with_no_existing_keys_passes_through():
+    out = _validate({"city": "Bangalore"}, max_new=3, existing_keys=())
+    assert out == {"city": "Bangalore"}
 
 
-def test_prompt_handles_empty_existing_facts():
-    prompt = _build_prompt("hi", "hi back", {}, None, max_new=3)
-    assert "(none yet)" in prompt
-    assert "(no prior turns)" in prompt
+def test_validate_dedups_against_existing_keys():
+    """If the proposed key is a noisy variant of an existing one, reconcile
+    it back to the canonical key so the upsert lands on the same row."""
+    existing = {"sleep_status"}
+    out = _validate({"current_sleep_status": "exhausted"}, max_new=3, existing_keys=existing)
+    # The "current_" filler should be stripped, mapping back to "sleep_status".
+    assert out == {"sleep_status": "exhausted"}
 
 
-# ---------- extract_facts (HTTP mocked) ----------
+# ---------- _strip_noise ----------
 
-class _FakeResponse:
-    def __init__(self, payload, status=200):
-        self._payload = payload
-        self.status_code = status
-        self.text = json.dumps(payload) if isinstance(payload, dict) else str(payload)
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            err = requests.HTTPError(f"{self.status_code}")
-            err.response = self
-            raise err
-
-    def json(self):
-        return self._payload
+def test_strip_noise_removes_modifier_suffixes():
+    assert _strip_noise("sleep_status_final") == "sleep_status"
+    assert _strip_noise("sleep_status_v2") == "sleep_status"
+    assert _strip_noise("sleep_status_updated") == "sleep_status"
+    assert _strip_noise("sleep_status_clarified") == "sleep_status"
 
 
-def test_extract_facts_happy_path(monkeypatch):
-    fake_content = json.dumps({"exam_date": "tuesday"})
-    fake_payload = {"choices": [{"message": {"content": fake_content}}]}
-    monkeypatch.setattr(fact_extractor.requests, "post",
-                        lambda *a, **kw: _FakeResponse(fake_payload))
-
-    out = extract_facts("my exam is on tuesday", "got it, good luck")
-    assert out == {"exam_date": "tuesday"}
+def test_strip_noise_removes_filler_prefixes():
+    assert _strip_noise("current_sleep_status") == "sleep_status"
+    assert _strip_noise("latest_mood") == "mood"
+    assert _strip_noise("recent_activity_status") == "activity_status"
 
 
-def test_extract_facts_empty_on_http_error(monkeypatch):
-    monkeypatch.setattr(fact_extractor.requests, "post",
-                        lambda *a, **kw: _FakeResponse({"error": "boom"}, status=500))
-    assert extract_facts("x", "y") == {}
+def test_strip_noise_removes_filler_infix():
+    # 'current' between two semantic tokens should also vanish
+    assert _strip_noise("prajwal_current_sleep_status") == "prajwal_sleep_status"
 
 
-def test_extract_facts_empty_on_bad_json(monkeypatch):
-    fake = {"choices": [{"message": {"content": "not json"}}]}
-    monkeypatch.setattr(fact_extractor.requests, "post",
-                        lambda *a, **kw: _FakeResponse(fake))
-    assert extract_facts("x", "y") == {}
+def test_strip_noise_leaves_clean_keys_alone():
+    assert _strip_noise("exam_date") == "exam_date"
+    assert _strip_noise("sister_name") == "sister_name"
+    assert _strip_noise("city") == "city"
 
 
-def test_extract_facts_empty_on_connection_error(monkeypatch):
-    def raising(*a, **kw):
-        raise requests.ConnectionError("down")
-    monkeypatch.setattr(fact_extractor.requests, "post", raising)
-    assert extract_facts("x", "y") == {}
+# ---------- _reconcile_key ----------
+
+def test_reconcile_returns_existing_key_when_noisy_variant():
+    existing = ["sleep_status", "exam_date"]
+    assert _reconcile_key("current_sleep_status", existing) == "sleep_status"
+    assert _reconcile_key("sleep_status_final", existing) == "sleep_status"
 
 
-# ---------- pipeline integration ----------
-
-def _base_history():
-    return [
-        {"role": "system", "content": "<Who you are>\npersona"},
-        {"role": "system", "content": "<time_context>10:00</time_context>"},
-        {"role": "system", "content": "<internal_state>x</internal_state>"},
-    ]
+def test_reconcile_returns_none_when_no_match():
+    existing = ["city", "exam_date"]
+    assert _reconcile_key("favorite_color", existing) is None
 
 
-def _install_pipeline_mocks(monkeypatch, draft="hey, that sounds fun"):
-    monkeypatch.setattr(pipeline, "classify_emotion",
-                        lambda *a, **kw: {"primary": "joy", "intensity": 0.3,
-                                          "underlying_need": None, "undertones": []})
-    monkeypatch.setattr(pipeline, "theory_of_mind",
-                        lambda *a, **kw: {"feeling": "up", "avoid": None, "what_helps": None})
-    monkeypatch.setattr(pipeline, "generate_reply", lambda *a, **kw: draft)
-
-
-def test_pipeline_persists_extracted_facts(monkeypatch):
-    monkeypatch.setattr(config, "ENABLE_EMPATHY_PIPELINE", True)
-    monkeypatch.setattr(config, "ENABLE_AUTO_FACTS", True)
-    _install_pipeline_mocks(monkeypatch)
-    monkeypatch.setattr(fact_extractor, "extract_facts",
-                        lambda *a, **kw: {"exam_date": "tuesday"})
-
-    sid = db.start_session()
-    reply, trace = pipeline.run_empathy_turn(
-        "my exam is on tuesday", _base_history(), session_id=sid
-    )
-
-    assert trace.facts_extracted == {"exam_date": "tuesday"}
-    assert db.get_facts() == {"exam_date": "tuesday"}
-
-
-def test_pipeline_survives_extractor_exception(monkeypatch):
-    monkeypatch.setattr(config, "ENABLE_EMPATHY_PIPELINE", True)
-    monkeypatch.setattr(config, "ENABLE_AUTO_FACTS", True)
-    _install_pipeline_mocks(monkeypatch, draft="sure thing")
-
-    def boom(*a, **kw):
-        raise RuntimeError("extractor crashed")
-    monkeypatch.setattr(fact_extractor, "extract_facts", boom)
-
-    sid = db.start_session()
-    reply, trace = pipeline.run_empathy_turn("x", _base_history(), session_id=sid)
-
-    assert reply == "sure thing"
-    assert trace.facts_extracted == {}
-    assert db.get_facts() == {}
-
-
-def test_pipeline_skips_extractor_when_auto_facts_disabled(monkeypatch):
-    monkeypatch.setattr(config, "ENABLE_EMPATHY_PIPELINE", True)
-    monkeypatch.setattr(config, "ENABLE_AUTO_FACTS", False)
-    _install_pipeline_mocks(monkeypatch)
-
-    called = {"n": 0}
-    def tracking(*a, **kw):
-        called["n"] += 1
-        return {"should_not": "appear"}
-    monkeypatch.setattr(fact_extractor, "extract_facts", tracking)
-
-    sid = db.start_session()
-    reply, trace = pipeline.run_empathy_turn("hi", _base_history(), session_id=sid)
-
-    assert called["n"] == 0
-    assert trace.facts_extracted == {}
-    assert db.get_facts() == {}
-
-
-def test_pipeline_emits_noting_phase(monkeypatch):
-    monkeypatch.setattr(config, "ENABLE_EMPATHY_PIPELINE", True)
-    monkeypatch.setattr(config, "ENABLE_AUTO_FACTS", True)
-    _install_pipeline_mocks(monkeypatch)
-    monkeypatch.setattr(fact_extractor, "extract_facts",
-                        lambda *a, **kw: {"city": "Bangalore"})
-
-    phases = []
-    sid = db.start_session()
-    pipeline.run_empathy_turn("I'm in Bangalore", _base_history(),
-                              session_id=sid, on_phase=phases.append)
-
-    assert "making a note" in phases
-
-
-def test_pipeline_caps_facts_at_max_per_turn(monkeypatch):
-    monkeypatch.setattr(config, "ENABLE_EMPATHY_PIPELINE", True)
-    monkeypatch.setattr(config, "ENABLE_AUTO_FACTS", True)
-    monkeypatch.setattr(config, "AUTO_FACTS_MAX_PER_TURN", 2)
-    _install_pipeline_mocks(monkeypatch)
-    # extractor returns 4 facts; pipeline should only upsert the first 2
-    monkeypatch.setattr(fact_extractor, "extract_facts",
-                        lambda *a, **kw: {"a": "1", "b": "2", "c": "3", "d": "4"})
-
-    sid = db.start_session()
-    pipeline.run_empathy_turn("info dump", _base_history(), session_id=sid)
-
-    saved = db.get_facts()
-    assert len(saved) == 2
+def test_reconcile_returns_canonical_key_for_exact_match():
+    """When the new key already matches an existing one exactly, the
+    reconciler returns that same key — meaning the caller upserts in place
+    rather than creating a near-duplicate."""
+    existing = ["sleep_status"]
+    assert _reconcile_key("sleep_status", existing) == "sleep_status"

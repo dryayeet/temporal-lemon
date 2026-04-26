@@ -1,10 +1,21 @@
+"""Tests for `empathy/tom.py` + the legacy `format_tom_block` formatter.
+
+The standalone `theory_of_mind()` LLM call was retired when emotion + ToM
+merged into the single `empathy/user_read.read_user` round-trip; that flow
+is covered by mocks in `test_pipeline.py`. The unified pre-reply prompt
+block is now `<reading>` (combined emotion + ToM); see `test_emotion.py`
+for that. `format_tom_block` is kept as a legacy formatter in `prompts`
+so existing imports / older tooling don't break.
+
+What's still in `empathy/tom.py`: `DEFAULT_TOM`, `_validate`, `_parse`.
+"""
 import json
 
 import pytest
-import requests
 
 from empathy import tom
-from empathy.tom import DEFAULT_TOM, format_tom_block, theory_of_mind
+from empathy.tom import DEFAULT_TOM
+from prompts import format_tom_block
 
 
 # ---------- _parse ----------
@@ -46,7 +57,12 @@ def test_parse_rejects_non_object():
         tom._parse('"a string"')
 
 
-# ---------- format_tom_block ----------
+def test_default_has_three_nullable_fields():
+    assert set(DEFAULT_TOM.keys()) == {"feeling", "avoid", "what_helps"}
+    assert all(v is None for v in DEFAULT_TOM.values())
+
+
+# ---------- format_tom_block (legacy formatter, kept in prompts/) ----------
 
 def test_format_includes_all_three():
     out = format_tom_block({"feeling": "sad", "avoid": "advice", "what_helps": "listen"})
@@ -60,53 +76,3 @@ def test_format_handles_nones():
     out = format_tom_block({"feeling": None, "avoid": None, "what_helps": None})
     assert "unclear" in out
     assert out.count("(no specific guidance)") == 2
-
-
-# ---------- theory_of_mind (HTTP mocked) ----------
-
-class _FakeResponse:
-    def __init__(self, payload, status=200):
-        self._payload = payload
-        self.status_code = status
-        self.text = json.dumps(payload) if isinstance(payload, dict) else str(payload)
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            err = requests.HTTPError(f"{self.status_code}")
-            err.response = self
-            raise err
-    def json(self): return self._payload
-
-
-def test_tom_happy_path(monkeypatch):
-    fake_tom = {"feeling": "anxious", "avoid": "rushing", "what_helps": "slow down"}
-    fake_payload = {"choices": [{"message": {"content": json.dumps(fake_tom)}}]}
-    monkeypatch.setattr(tom.requests, "post", lambda *a, **kw: _FakeResponse(fake_payload))
-
-    out = theory_of_mind("the deadline is tomorrow", emotion={"primary": "anxiety", "intensity": 0.7})
-    assert out["feeling"] == "anxious"
-    assert out["what_helps"] == "slow down"
-
-
-def test_tom_returns_default_on_error(monkeypatch):
-    monkeypatch.setattr(tom.requests, "post",
-                        lambda *a, **kw: _FakeResponse({"err": "boom"}, status=500))
-    assert theory_of_mind("hi") == DEFAULT_TOM
-
-
-def test_tom_returns_default_on_bad_json(monkeypatch):
-    fake = {"choices": [{"message": {"content": "garbage"}}]}
-    monkeypatch.setattr(tom.requests, "post", lambda *a, **kw: _FakeResponse(fake))
-    assert theory_of_mind("hi") == DEFAULT_TOM
-
-
-def test_tom_includes_emotion_in_prompt(monkeypatch):
-    captured = {}
-    def fake_post(*a, **kw):
-        captured["body"] = kw.get("json", {})
-        return _FakeResponse({"choices": [{"message": {"content": json.dumps(DEFAULT_TOM)}}]})
-    monkeypatch.setattr(tom.requests, "post", fake_post)
-
-    theory_of_mind("test", emotion={"primary": "fear", "intensity": 0.9, "undertones": ["anxiety"]})
-    prompt = captured["body"]["messages"][0]["content"]
-    assert "fear" in prompt
-    assert "0.90" in prompt
