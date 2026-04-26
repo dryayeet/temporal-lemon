@@ -180,6 +180,7 @@ Per-turn LLM cost: **3 calls** (`user_read` + reply + facts-only `post_exchange`
 
 ## Documentation
 
+- [`docs/system_overview.md`](docs/system_overview.md) — **start here**. Whole-system tour with the per-turn flow diagram, module-by-module breakdown, frameworks list, and how every piece connects to the project's goal.
 - [`docs/TECHNICAL.md`](docs/TECHNICAL.md) — full technical reference: every module, every call path, every system block, every knob
 - [`docs/architecture.md`](docs/architecture.md) — how all the pieces fit, per-turn pipeline diagram
 - [`docs/dyadic_state.md`](docs/dyadic_state.md) — three-layer dyadic state design (Big 5 + adaptations + PAD), psychological grounding, schema, migration history
