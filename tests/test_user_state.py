@@ -128,10 +128,12 @@ def test_apply_delta_pad_nudge_clamps_to_unit_interval():
 def test_apply_delta_freezes_traits_via_validation_first():
     # Even if a delta sneaks past with a 0.5 trait nudge, validate_delta caps it at 0.02
     prev = copy.deepcopy(DEFAULT_USER_STATE)
+    baseline = prev["traits"]["openness"]
     raw_delta = {"trait_nudges": {"openness": 0.5}}
     sane_delta = validate_delta(raw_delta)
     out = apply_delta(prev, sane_delta)
-    assert abs(out["traits"]["openness"] - 0.02) < 1e-9
+    # nudge applied on top of whatever baseline DEFAULT_USER_STATE seeds
+    assert abs(out["traits"]["openness"] - (baseline + 0.02)) < 1e-9
 
 
 def test_apply_delta_adds_goals_dedup():
@@ -225,6 +227,25 @@ def test_format_cold_start_emits_first_read_message():
 def test_format_cold_start_default_state_collapses():
     out = format_user_state_block(DEFAULT_USER_STATE)
     assert "First read of this person" in out
+
+
+def test_format_cold_start_still_surfaces_trait_baseline():
+    """Even when PAD/adaptations are all-default, the configured Big 5
+    baseline should be rendered so lemon reads it from turn one."""
+    out = format_user_state_block(DEFAULT_USER_STATE)
+    assert "Roughly:" in out
+    assert "high openness" in out
+
+
+def test_default_user_state_has_calibrated_trait_baseline():
+    """DEFAULT_USER_STATE seeds calibrated Big 5 values for this user, not
+    population zero. Traits still drift via trait_nudges (capped tiny)."""
+    traits = DEFAULT_USER_STATE["traits"]
+    assert traits["openness"] == 0.75
+    assert traits["conscientiousness"] == 0.70
+    assert traits["extraversion"] == 0.55
+    assert traits["agreeableness"] == 0.62
+    assert traits["neuroticism"] == -0.20
 
 
 def test_format_includes_pad_numbers():

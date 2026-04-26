@@ -433,12 +433,30 @@ def _trait_descriptor(value: float, label: str) -> Optional[str]:
     return f"slightly low {label}"
 
 
+def _render_trait_line(traits: dict) -> Optional[str]:
+    """Render the Big 5 trait dict as one prose line, or None if every trait
+    is too close to the population mean to be worth surfacing."""
+    trait_specs = [
+        (float(traits.get("openness", 0.0)),          "openness"),
+        (float(traits.get("conscientiousness", 0.0)), "conscientiousness"),
+        (float(traits.get("extraversion", 0.0)),      "extraversion"),
+        (float(traits.get("agreeableness", 0.0)),     "agreeableness"),
+        (float(traits.get("neuroticism", 0.0)),       "neuroticism"),
+    ]
+    descriptors = [d for d in (_trait_descriptor(v, l) for v, l in trait_specs) if d]
+    if not descriptors:
+        return None
+    return "Roughly: " + ", ".join(descriptors) + "."
+
+
 def format_user_state_block(state: Optional[dict]) -> str:
     """Compact prose rendering of the user's tonic state for the system stack.
 
-    Cold-start (default-shaped state) collapses to a one-line low-confidence
-    notice. The block is framed as background context — the model is told not
-    to narrate it.
+    Cold-start (default-shaped PAD + empty adaptations) collapses the live
+    parts to a one-line low-confidence notice but still surfaces the trait
+    baseline if one is configured — traits are slow-drift, the LLM should see
+    them from turn one. The block is framed as background context — the model
+    is told not to narrate it.
     """
     if not state:
         body = "First read of this person — let your reply do the inferring."
@@ -457,22 +475,18 @@ def format_user_state_block(state: Optional[dict]) -> str:
             not any(adapt.get(k) for k in ("current_goals", "values", "concerns"))
             and not adapt.get("relational_stance")
         )
+        trait_line = _render_trait_line(traits)
         if is_pad_zero and no_adapt and mood == "neutral":
-            body = "First read of this person — let your reply do the inferring."
+            cold_lines = ["First read of this person — let your reply do the inferring."]
+            if trait_line:
+                cold_lines.append(trait_line)
+            body = "\n".join(cold_lines)
         else:
             lines = [
                 f"Mood: {mood} (pleasure {pleasure:+.2f}, arousal {arousal:+.2f}, dominance {dominance:+.2f})",
             ]
-            trait_specs = [
-                (float(traits.get("openness", 0.0)),          "openness"),
-                (float(traits.get("conscientiousness", 0.0)), "conscientiousness"),
-                (float(traits.get("extraversion", 0.0)),      "extraversion"),
-                (float(traits.get("agreeableness", 0.0)),     "agreeableness"),
-                (float(traits.get("neuroticism", 0.0)),       "neuroticism"),
-            ]
-            descriptors = [d for d in (_trait_descriptor(v, l) for v, l in trait_specs) if d]
-            if descriptors:
-                lines.append("Roughly: " + ", ".join(descriptors) + ".")
+            if trait_line:
+                lines.append(trait_line)
             if adapt.get("current_goals"):
                 lines.append("On their mind: " + ", ".join(adapt["current_goals"]) + ".")
             rendered_values = _render_value_list(adapt.get("values"))
@@ -628,8 +642,9 @@ def _format_lemon_state_for_read(state: Optional[dict]) -> str:
 
 def _format_user_state_for_read(state: Optional[dict]) -> str:
     """Compact, model-readable rendering of the current user_state for the
-    user_read prompt. Cold-start (all-zero, empty) collapses to a one-line
-    notice so the model knows it has no prior signal to anchor to.
+    user_read prompt. Cold-start (all-zero PAD, empty adaptations) collapses
+    the live parts to a one-line notice but still surfaces a configured trait
+    baseline so the reader knows the user's stable disposition from turn one.
     """
     if not state:
         return "(no prior state — first read of this person)"
@@ -643,15 +658,6 @@ def _format_user_state_for_read(state: Optional[dict]) -> str:
     traits = state.get("traits") or {}
     adapt = state.get("adaptations") or {}
 
-    # Cold-start guard: zeroed PAD and empty adaptations means we have nothing.
-    is_pad_zero = abs(pleasure) < 1e-6 and abs(arousal) < 1e-6 and abs(dominance) < 1e-6
-    no_adapt = not any(adapt.get(k) for k in ("current_goals", "values", "concerns")) and not adapt.get("relational_stance")
-    if is_pad_zero and no_adapt and mood == "neutral":
-        return "(no prior state — first read of this person)"
-
-    lines = [
-        f"Mood: {mood} (pleasure {pleasure:+.2f}, arousal {arousal:+.2f}, dominance {dominance:+.2f})",
-    ]
     trait_pairs = [
         ("openness", "open"), ("conscientiousness", "structured"),
         ("extraversion", "outgoing"), ("agreeableness", "agreeable"),
@@ -665,8 +671,21 @@ def _format_user_state_for_read(state: Optional[dict]) -> str:
         descriptor = "high" if v > 0.5 else "low" if v < -0.5 else "somewhat"
         sign = "" if v > 0 else "low-"
         trait_bits.append(f"{descriptor} {label}" if v > 0 else f"{descriptor} {sign}{label}")
-    if trait_bits:
-        lines.append("Roughly: " + ", ".join(trait_bits) + ".")
+    trait_line = ("Roughly: " + ", ".join(trait_bits) + ".") if trait_bits else None
+
+    # Cold-start guard: zeroed PAD and empty adaptations means we have no
+    # fresh emotional signal yet. Still surface trait baseline if any.
+    is_pad_zero = abs(pleasure) < 1e-6 and abs(arousal) < 1e-6 and abs(dominance) < 1e-6
+    no_adapt = not any(adapt.get(k) for k in ("current_goals", "values", "concerns")) and not adapt.get("relational_stance")
+    if is_pad_zero and no_adapt and mood == "neutral":
+        cold = "(no prior emotional read — first read of this person)"
+        return f"{cold}\n{trait_line}" if trait_line else cold
+
+    lines = [
+        f"Mood: {mood} (pleasure {pleasure:+.2f}, arousal {arousal:+.2f}, dominance {dominance:+.2f})",
+    ]
+    if trait_line:
+        lines.append(trait_line)
     if adapt.get("current_goals"):
         lines.append("On their mind: " + ", ".join(adapt["current_goals"]) + ".")
     rendered_values = _render_value_list(adapt.get("values"))

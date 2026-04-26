@@ -40,13 +40,29 @@ log = get_logger("storage.user_state")
 
 # ---------- canonical schema ----------
 
+# Calibrated default Big 5 baseline for the user this build is shipped to.
+#
+# Traits are slow-drift / essentially-frozen at stage 1, so starting from
+# population zero would mean lemon talks to "an average person" until the LLM
+# accumulates enough nudges (capped ±0.02 per turn) to converge on the real
+# disposition. That takes weeks of conversation. Seeding with a known baseline
+# lets lemon match register from turn one.
+#
+# These specific values are calibrated for the user this instance is for; the
+# values are surfaced in the `<user_state>` block (see prompts.format_user_state_block)
+# so lemon reads them as "background disposition" alongside the live PAD / mood.
+# trait_nudges still flow normally on top of this baseline; nothing about the
+# delta path changes.
+#
+# OCEAN is a standard psychological model the LLM understands directly — no
+# extra explanation in the prompt is needed.
 DEFAULT_USER_STATE: dict = {
     "traits": {
-        "openness":          0.0,
-        "conscientiousness": 0.0,
-        "extraversion":      0.0,
-        "agreeableness":     0.0,
-        "neuroticism":       0.0,
+        "openness":          0.75,
+        "conscientiousness": 0.70,
+        "extraversion":      0.55,
+        "agreeableness":     0.62,
+        "neuroticism":      -0.20,
     },
     "adaptations": {
         "current_goals":     [],
