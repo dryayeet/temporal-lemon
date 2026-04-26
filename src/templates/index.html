@@ -360,6 +360,17 @@
       }
 
       const fmt = (n) => (n >= 0 ? "+" : "") + n.toFixed(2);
+      const renderValue = (v) => {
+        if (typeof v === "string") return v;
+        if (v && typeof v === "object") {
+          const label = v.label || "";
+          return v.schwartz ? `${label} (${v.schwartz})` : label;
+        }
+        return "";
+      };
+      const renderValueList = (vs) =>
+        (vs || []).map(renderValue).filter(Boolean).join(", ");
+
       const lines = [];
       lines.push(`mood: ${mood}`);
       lines.push(`PAD: pleasure ${fmt(pleasure)}, arousal ${fmt(arousal)}, dominance ${fmt(dominance)}`);
@@ -370,7 +381,7 @@
       }
       lines.push("adaptations:");
       lines.push(`  goals:    ${(adapt.current_goals || []).join(", ") || "(none)"}`);
-      lines.push(`  values:   ${(adapt.values || []).join(", ") || "(none)"}`);
+      lines.push(`  values:   ${renderValueList(adapt.values) || "(none)"}`);
       lines.push(`  concerns: ${(adapt.concerns || []).join(", ") || "(none)"}`);
       lines.push(`  stance:   ${adapt.relational_stance || "(none)"}`);
       return lines.join("\n");

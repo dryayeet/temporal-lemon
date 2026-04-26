@@ -355,7 +355,7 @@ operationalised by the most empirically-defensible model in its category.
 | layer | timescale | what it represents | model used | dynamics |
 | --- | --- | --- | --- | --- |
 | **Traits** | months / years (essentially static) | dispositional tendencies | **Big 5 / OCEAN** | hardcoded for lemon; slowly inferred for the user |
-| **Characteristic adaptations** | weeks / months (evolves) | goals, values, concerns, relational stance | structured strings (free-form, optionally Schwartz-tagged) | accumulates and prunes across sessions |
+| **Characteristic adaptations** | weeks / months (evolves) | goals, values, concerns, relational stance | free-form strings + Schwartz-tagged values | accumulates and prunes across sessions |
 | **State (mood)** | hours / days (drifts) | current background affect | **PAD (Pleasure-Arousal-Dominance)** + derived categorical mood label | nudged each turn by phasic events, reverts toward trait-defined home range |
 
 Plus, **per turn (ephemeral)**:
@@ -385,7 +385,7 @@ INTERNAL_STATE = {
     # Layer 2: characteristic adaptations
     "adaptations": {
         "current_goals":     list[str],   # what they're trying to do
-        "values":            list[str],   # what matters to them
+        "values":            list[dict],  # tagged: {"label": str, "schwartz": str | None}
         "concerns":          list[str],   # what's on their mind
         "relational_stance": str | None,  # how they show up to the other agent
     },
@@ -442,11 +442,16 @@ a function of PAD coordinates, not as a separate primary
 representation. The LLM reads the label like a friend reads a vibe;
 the PAD coordinates underneath give the system smooth dynamics.
 
-**Free-form adaptations (with structured slots).** `current_goals`,
-`values`, `concerns`, `relational_stance` are short strings. Could be
-Schwartz-tagged later (achievement, benevolence, etc., 10 universal
-values). For stage 1, free-form is more flexible and matches lemon's
-existing fact-storage style.
+**Free-form adaptations with Schwartz-tagged values.** `current_goals`,
+`concerns`, `relational_stance` are free-form short strings. **`values`
+is now structured**: each entry is `{"label": str, "schwartz": <one of
+the 10 Schwartz universal values, or null>}`. The Schwartz taxonomy
+(Schwartz 1992) — self_direction, stimulation, hedonism, achievement,
+power, security, conformity, tradition, benevolence, universalism — is
+the most empirically-validated values framework, replicated in 80+
+countries. Tagging makes values *comparable* across users and *groupable*
+for retrieval. Untagged entries (legacy snapshots before tagging
+shipped) auto-normalize to `{label, schwartz: null}` on read.
 
 **Phasic emotion stays separate.** The 23-label categorical event
 (already implemented in `empathy/emotion.py`) is the *input* that
@@ -808,22 +813,29 @@ With the three-stage migration complete, the obvious next moves:
    in a separate offline pass.
 2. **HEXACO upgrade** — adding Honesty-Humility as a sixth trait
    dimension. Cheap; mostly a constant swap.
-3. **Schwartz-tagged values** — replace free-form `values` strings
-   with tagged entries from Schwartz's 10-value taxonomy for better
-   retrievability.
-4. **ToM ↔ user_state divergence signal** — when lemon's per-turn
+3. **ToM ↔ user_state divergence signal** — when lemon's per-turn
    ToM read in the `<reading>` block differs from the inferred
    `<user_state>`, treat it as a signal lemon misread; feed back
    into the next-turn prompt.
-5. **Phasic-event-to-PAD mapping** — currently the LLM emits PAD
+4. **Phasic-event-to-PAD mapping** — currently the LLM emits PAD
    nudges directly. A hardcoded affect→PAD mapping table per emotion
    label could be a faster / cheaper path with comparable signal.
-6. **Lemon-side phasic events** — lemon currently has tonic state
+5. **Lemon-side phasic events** — lemon currently has tonic state
    updated each turn but no explicit phasic event. A per-turn lemon
    reaction object (analogous to the user's emotion classification)
    could let `<reading>` show lemon's reaction alongside the user's.
-7. **Drop the legacy `state_snapshots` table** — once the migration
+6. **Drop the legacy `state_snapshots` table** — once the migration
    has been live long enough, the archive is no longer interesting.
+
+**Already shipped (post-stages-1+2+3):**
+
+- **Schwartz-tagged values** (2026-04-27). The `values` slot in
+  `state.adaptations` is now `list[{"label": str, "schwartz": str |
+  None}]`. The 10 Schwartz categories live in `src/schwartz.py`; the
+  `user_read` prompt asks the LLM to tag any `value_add` entry with
+  one of the 10 (or `null` if no category fits). Lemon's persona-fixed
+  values come pre-tagged from `persona.LEMON_ADAPTATIONS`. Legacy
+  untagged string values auto-normalize on read.
 
 ---
 

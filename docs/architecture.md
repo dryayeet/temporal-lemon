@@ -26,10 +26,12 @@ persona.py    (emotion,        (chat,             (db, memory,   context.py     
 
 `persona.py` exports `LEMON_TRAITS` (Big 5) and `LEMON_ADAPTATIONS` (goals
 / values / concerns / stance) — the static seeds of lemon's three-layer
-state. `storage/lemon_state.py` and `storage/user_state.py` hold the
-runtime three-layer schema for both agents. The legacy `storage/state.py`
-remains as a deprecated shim for the legacy migration path. See
-`docs/dyadic_state.md` for the full schema and rationale.
+state. `schwartz.py` defines the 10 Schwartz universal values that tag
+every entry in the `values` slot of `adaptations`. `storage/lemon_state.py`
+and `storage/user_state.py` hold the runtime three-layer schema for both
+agents. The legacy `storage/state.py` remains as a deprecated shim for
+the legacy migration path. See `docs/dyadic_state.md` for the full
+schema and rationale.
 
 Two entry points, one core:
 

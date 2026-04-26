@@ -29,6 +29,43 @@ def test_default_pulls_adaptations_from_persona():
     assert DEFAULT_LEMON_STATE["adaptations"]["relational_stance"] == LEMON_ADAPTATIONS["relational_stance"]
 
 
+def test_default_values_are_schwartz_tagged():
+    """Persona values should ship tagged with Schwartz categories."""
+    vals = DEFAULT_LEMON_STATE["adaptations"]["values"]
+    assert all(isinstance(v, dict) for v in vals)
+    assert all("label" in v and "schwartz" in v for v in vals)
+    # Specific tags expected by the persona constants
+    by_label = {v["label"]: v["schwartz"] for v in vals}
+    assert by_label["honesty"] == "universalism"
+    assert by_label["warmth without performance"] == "benevolence"
+    assert by_label["calm"] == "security"
+
+
+def test_fresh_session_repulls_values_from_persona():
+    """If a previous snapshot has stale untagged values, fresh_lemon_session_state
+    should re-pull tagged values from persona."""
+    from persona import LEMON_ADAPTATIONS
+    stale = copy.deepcopy(DEFAULT_LEMON_STATE)
+    stale["adaptations"]["values"] = ["honesty", "calm"]   # legacy untagged
+    save_lemon_state(stale)
+    fresh = fresh_lemon_session_state()
+    assert fresh["adaptations"]["values"] == LEMON_ADAPTATIONS["values"]
+
+
+def test_load_normalizes_legacy_untagged_lemon_values():
+    """Old snapshots with raw string values should normalize on load
+    (independent of fresh_lemon_session_state's persona re-pull)."""
+    from storage import db
+    legacy = copy.deepcopy(DEFAULT_LEMON_STATE)
+    legacy["adaptations"]["values"] = ["honesty", "calm"]
+    db.save_lemon_state_snapshot(legacy)
+    loaded = load_lemon_state()
+    assert all(isinstance(v, dict) for v in loaded["adaptations"]["values"])
+    labels = [v["label"] for v in loaded["adaptations"]["values"]]
+    assert "honesty" in labels
+    assert "calm" in labels
+
+
 def test_default_state_is_neutral_pad():
     s = DEFAULT_LEMON_STATE["state"]
     assert s["pleasure"] == 0.0

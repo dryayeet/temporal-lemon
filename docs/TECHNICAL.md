@@ -97,7 +97,8 @@ src/
   web.py                 FastAPI app + SSE + introspection endpoints
 
   prompts.py             single source of truth for every prompt + block formatter
-  persona.py             LEMON_TRAITS (Big 5) + LEMON_ADAPTATIONS (goals/values/concerns/stance)
+  persona.py             LEMON_TRAITS (Big 5) + LEMON_ADAPTATIONS (goals/Schwartz-tagged values/concerns/stance)
+  schwartz.py            Schwartz's 10 universal values + alias coercion + entry normalizer
 
   empathy/               empathy-pipeline-specific logic
     emotion.py           23-label emotion schema, families, validator
@@ -297,7 +298,9 @@ Rendered from the three-layer dict in `storage.lemon_state.DEFAULT_LEMON_STATE`:
     "traits":      {"openness": 0.5, "conscientiousness": -0.2, "extraversion": 0.3,
                     "agreeableness": 0.8, "neuroticism": -0.6},
     "adaptations": {"current_goals": ["be present for the user", "match their energy without forcing it"],
-                    "values":        ["honesty", "warmth without performance", "calm"],
+                    "values":        [{"label": "honesty", "schwartz": "universalism"},
+                                      {"label": "warmth without performance", "schwartz": "benevolence"},
+                                      {"label": "calm", "schwartz": "security"}],
                     "concerns":      [],
                     "relational_stance": "close friend, not assistant"},
     "state":       {"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0, "mood_label": "neutral"},
@@ -625,7 +628,7 @@ Three-layer dict, same schema as the user side. Rendered into `<lemon_state>` ev
     "traits":      {"openness": float, "conscientiousness": float, "extraversion": float,
                     "agreeableness": float, "neuroticism": float},   # each in [-1, +1]
     "adaptations": {"current_goals":     list[str],
-                    "values":            list[str],
+                    "values":            list[dict],   # tagged: {label, schwartz: str | None}
                     "concerns":          list[str],
                     "relational_stance": str | None},
     "state":       {"pleasure": float, "arousal": float, "dominance": float,
@@ -898,7 +901,8 @@ LEMON_EMPATHY=0 python src/web.py
 | `lem.py` | CLI REPL |
 | `web.py` | FastAPI app + SSE + introspection |
 | `prompts.py` | single source of truth for every prompt + every block formatter |
-| `persona.py` | `LEMON_TRAITS` (Big 5) + `LEMON_ADAPTATIONS` (goals/values/concerns/stance) |
+| `persona.py` | `LEMON_TRAITS` (Big 5) + `LEMON_ADAPTATIONS` (goals/Schwartz-tagged values/concerns/stance) |
+| `schwartz.py` | Schwartz's 10 universal values, descriptions, `coerce_schwartz`, `normalize_value_entry` |
 | `prompt_stack.py` | `replace_system_block` + `compress_history` |
 | `empathy/emotion.py` | 23-label emotion schema, family map, `_validate` |
 | `empathy/tom.py` | ToM schema, `_validate` |

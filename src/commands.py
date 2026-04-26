@@ -41,6 +41,20 @@ CommandFn = Callable[[ChatContext, str], CommandResult]
 _REGISTRY: dict[str, tuple[CommandFn, str]] = {}
 
 
+def _render_values(values) -> str:
+    """Render a list of value entries (tagged dicts or plain strings) as
+    a comma-separated string. Tagged: 'label (tag)'; untagged: 'label'."""
+    bits = []
+    for v in values or []:
+        if isinstance(v, dict):
+            label = v.get("label") or ""
+            tag = v.get("schwartz")
+            bits.append(f"{label} ({tag})" if tag else label)
+        elif isinstance(v, str):
+            bits.append(v)
+    return ", ".join(b for b in bits if b)
+
+
 def command(name: str, help_text: str) -> Callable[[CommandFn], CommandFn]:
     def decorator(fn: CommandFn) -> CommandFn:
         _REGISTRY[name] = (fn, help_text)
@@ -94,7 +108,7 @@ def _state(ctx: ChatContext, args: str) -> CommandResult:
         lines.append(f"    {k:<18} {float(traits.get(k, 0.0)):+.2f}")
     lines.append("  adaptations:")
     lines.append(f"    goals:    {', '.join(adapt.get('current_goals') or []) or '(none)'}")
-    lines.append(f"    values:   {', '.join(adapt.get('values') or []) or '(none)'}")
+    lines.append(f"    values:   {_render_values(adapt.get('values') or []) or '(none)'}")
     lines.append(f"    concerns: {', '.join(adapt.get('concerns') or []) or '(none)'}")
     lines.append(f"    stance:   {adapt.get('relational_stance') or '(none)'}")
     return CommandResult("\n".join(lines))
@@ -119,7 +133,7 @@ def _user_state(ctx: ChatContext, args: str) -> CommandResult:
         lines.append(f"    {k:<18} {float(traits.get(k, 0.0)):+.2f}")
     lines.append("  adaptations:")
     lines.append(f"    goals:    {', '.join(adapt.get('current_goals') or []) or '(none)'}")
-    lines.append(f"    values:   {', '.join(adapt.get('values') or []) or '(none)'}")
+    lines.append(f"    values:   {_render_values(adapt.get('values') or []) or '(none)'}")
     lines.append(f"    concerns: {', '.join(adapt.get('concerns') or []) or '(none)'}")
     lines.append(f"    stance:   {adapt.get('relational_stance') or '(none)'}")
     return CommandResult("\n".join(lines))

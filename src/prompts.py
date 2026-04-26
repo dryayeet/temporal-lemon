@@ -28,8 +28,31 @@ from datetime import datetime
 from typing import Mapping, Optional
 
 from llm.parse_utils import format_recent_for_prompt
+from schwartz import SCHWARTZ_DESCRIPTIONS, SCHWARTZ_VALUES
 from temporal.age import humanize_age
 from temporal.clock import session_duration_note, time_of_day_label
+
+
+def _render_value(entry) -> str:
+    """Render a tagged value entry as 'label (tag)' or just 'label' when
+    the schwartz tag is null. Accepts both legacy strings and {label,schwartz}
+    dicts so it's safe to call from anywhere in the prompt layer."""
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        label = entry.get("label") or ""
+        tag = entry.get("schwartz")
+        if tag:
+            return f"{label} ({tag})"
+        return label
+    return ""
+
+
+def _render_value_list(values) -> str:
+    if not values:
+        return ""
+    rendered = [_render_value(v) for v in values]
+    return ", ".join(s for s in rendered if s)
 
 
 # =============================================================================
@@ -236,8 +259,9 @@ def format_lemon_state(state: dict) -> str:
         lines.append("You are: " + ", ".join(descriptors) + ".")
     if adapt.get("current_goals"):
         lines.append("What you care about doing: " + ", ".join(adapt["current_goals"]) + ".")
-    if adapt.get("values"):
-        lines.append("What you value: " + ", ".join(adapt["values"]) + ".")
+    rendered_values = _render_value_list(adapt.get("values"))
+    if rendered_values:
+        lines.append("What you value: " + rendered_values + ".")
     if adapt.get("concerns"):
         lines.append("Quietly on your mind: " + ", ".join(adapt["concerns"]) + ".")
     else:
@@ -450,8 +474,9 @@ def format_user_state_block(state: Optional[dict]) -> str:
                 lines.append("Roughly: " + ", ".join(descriptors) + ".")
             if adapt.get("current_goals"):
                 lines.append("On their mind: " + ", ".join(adapt["current_goals"]) + ".")
-            if adapt.get("values"):
-                lines.append("Cares about: " + ", ".join(adapt["values"]) + ".")
+            rendered_values = _render_value_list(adapt.get("values"))
+            if rendered_values:
+                lines.append("Cares about: " + rendered_values + ".")
             if adapt.get("concerns"):
                 lines.append("Worries: " + ", ".join(adapt["concerns"]) + ".")
             if adapt.get("relational_stance"):
@@ -517,6 +542,10 @@ def build_user_read_prompt(
 ) -> str:
     context = format_recent_for_prompt(recent_msgs)
     label_csv = ", ".join(EMOTION_LABELS)
+    schwartz_csv = ", ".join(SCHWARTZ_VALUES)
+    schwartz_table = "\n".join(
+        f"  - {v}: {SCHWARTZ_DESCRIPTIONS[v]}" for v in SCHWARTZ_VALUES
+    )
     user_view = _format_user_state_for_read(current_user_state)
     lemon_view = _format_lemon_state_for_read(current_lemon_state)
     return f"""
@@ -553,8 +582,12 @@ Return a JSON object with exactly four top-level keys: "emotion", "tom", "user_s
   - "trait_nudges": object with optional float keys (any subset of openness, conscientiousness, extraversion, agreeableness, neuroticism), each in [-0.02, +0.02]. Traits are essentially fixed; only nudge with strong evidence of stable disposition. Empty object is the default.
   - "goal_add" / "goal_remove": up to 2 short strings each
   - "concern_add" / "concern_remove": up to 2 short strings each
-  - "value_add": up to 1 short string; rare
+  - "value_add": up to 1 entry; rare. Each entry is an object {{"label": <short string>, "schwartz": <one of [{schwartz_csv}], or null if no category fits well>}}
   - "stance": short string or null — replacement relational stance, only if it has clearly shifted
+
+The Schwartz value categories (Schwartz 1992) for the "schwartz" field:
+{schwartz_table}
+Pick the best-fitting category if one is clearly implied by the message; otherwise emit null. Most turns this list is empty anyway — only add a value when the user genuinely reveals a stable thing they care about.
 
 "lemon_state_delta" — how lemon's OWN tonic state would naturally shift in response to what the user just said. EVEN MORE SUBTLE than the user's. Lemon is a stable warm friend; she is allowed to feel something but she does not match-and-mirror the user's swings. Most turns this is all-zeros / empty / null. Same shape as user_state_delta:
   - "pad": three floats in [-0.10, +0.10] (tighter cap than the user side — lemon is damped harder)
@@ -562,7 +595,7 @@ Return a JSON object with exactly four top-level keys: "emotion", "tom", "user_s
   - "trait_nudges": empty {{}} for stage 3 — lemon's traits are fixed by her persona and DO NOT drift. Always emit {{}}.
   - "goal_add" / "goal_remove": at most one entry; rare. Lemon's goals are mostly stable.
   - "concern_add" / "concern_remove": small list. If the user shared something heavy, lemon may quietly carry one new concern about them. If the user resolved something, lemon may drop the matching concern.
-  - "value_add": always []. Lemon's values are fixed.
+  - "value_add": always []. Lemon's values are persona-fixed.
   - "stance": null in almost every case. Only set when the relational dynamic genuinely shifted.
 
 Be honest and conservative across all four objects. If the message is flat small-talk: "neutral" emotion with low intensity, short noncommittal tom, both deltas all-zeros / empty / null. Do not over-pathologize. Do not invent state changes that aren't grounded in the message.
@@ -635,8 +668,9 @@ def _format_user_state_for_read(state: Optional[dict]) -> str:
         lines.append("Roughly: " + ", ".join(trait_bits) + ".")
     if adapt.get("current_goals"):
         lines.append("On their mind: " + ", ".join(adapt["current_goals"]) + ".")
-    if adapt.get("values"):
-        lines.append("Cares about: " + ", ".join(adapt["values"]) + ".")
+    rendered_values = _render_value_list(adapt.get("values"))
+    if rendered_values:
+        lines.append("Cares about: " + rendered_values + ".")
     if adapt.get("concerns"):
         lines.append("Worries: " + ", ".join(adapt["concerns"]) + ".")
     if adapt.get("relational_stance"):

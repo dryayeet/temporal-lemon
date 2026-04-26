@@ -8,6 +8,9 @@ the lemon-side `state.py` but on the *user* side, with the three-layer schema:
                     frozen at stage 1.
     adaptations   — current_goals / values / concerns / relational_stance.
                     Medium-term; LLM may add or remove single entries per turn.
+                    `values` entries are tagged with a Schwartz universal-value
+                    category (Schwartz 1992) when the LLM can pick one; entries
+                    are dicts `{"label": str, "schwartz": str | None}`.
     state         — PAD core affect (pleasure / arousal / dominance), each in
                     [-1, +1], plus a derived categorical mood label for prompt
                     readability. Nudged each turn by the phasic event read in
@@ -19,6 +22,8 @@ tonic state only.
 
 The validator and `apply_delta` follow the project's "clamp / whitelist /
 default rather than reject" pattern (see `empathy/emotion._validate`).
+Legacy untagged value lists (plain strings) are normalized to the new
+`{label, schwartz: None}` shape on read so existing snapshots keep working.
 """
 from __future__ import annotations
 
@@ -27,6 +32,7 @@ from typing import Optional
 
 from llm.parse_utils import strip_json_fences  # noqa: F401  (kept for parity / future use)
 from logging_setup import get_logger
+from schwartz import normalize_value_entry
 from storage.db import latest_user_state, save_user_state_snapshot
 
 log = get_logger("storage.user_state")
@@ -125,6 +131,28 @@ def _clean_string_list(values, max_items: int = _LIST_MAX_LEN) -> list[str]:
     return cleaned
 
 
+def _clean_value_list(values, max_items: int = _LIST_MAX_LEN) -> list[dict]:
+    """Normalize a list of value entries into canonical `{label, schwartz}`
+    dicts. Accepts strings (legacy untagged shape) and dicts. Dedupes by
+    case-insensitive label."""
+    if not isinstance(values, list):
+        return []
+    cleaned: list[dict] = []
+    seen: set[str] = set()
+    for v in values:
+        entry = normalize_value_entry(v, max_len=_STRING_MAX_LEN)
+        if entry is None:
+            continue
+        key = entry["label"].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(entry)
+        if len(cleaned) >= max_items:
+            break
+    return cleaned
+
+
 # ---------- validators ----------
 
 def validate_user_state(parsed: dict, fallback: Optional[dict] = None) -> dict:
@@ -148,7 +176,7 @@ def validate_user_state(parsed: dict, fallback: Optional[dict] = None) -> dict:
     adapt_in = parsed.get("adaptations") if isinstance(parsed.get("adaptations"), dict) else {}
     adaptations = {
         "current_goals":     _clean_string_list(adapt_in.get("current_goals", fb["adaptations"]["current_goals"])),
-        "values":            _clean_string_list(adapt_in.get("values", fb["adaptations"]["values"])),
+        "values":            _clean_value_list(adapt_in.get("values", fb["adaptations"]["values"])),
         "concerns":          _clean_string_list(adapt_in.get("concerns", fb["adaptations"]["concerns"])),
         "relational_stance": _clean_string(adapt_in.get("relational_stance", fb["adaptations"]["relational_stance"])),
     }
@@ -226,7 +254,8 @@ def validate_delta(parsed) -> dict:
         "goal_remove":    _clean_string_list(parsed.get("goal_remove"), max_items=2),
         "concern_add":    _clean_string_list(parsed.get("concern_add"), max_items=2),
         "concern_remove": _clean_string_list(parsed.get("concern_remove"), max_items=2),
-        "value_add":      _clean_string_list(parsed.get("value_add"), max_items=1),
+        # value_add accepts strings (legacy) and tagged dicts; normalized to dicts
+        "value_add":      _clean_value_list(parsed.get("value_add"), max_items=1),
         "stance":         _clean_string(parsed.get("stance")),
     }
 
@@ -282,11 +311,30 @@ def apply_delta(prev: dict, delta: dict) -> dict:
         delta.get("concern_add") or [],
         delta.get("concern_remove") or [],
     )
-    new_state["adaptations"]["values"] = _apply_list(
-        "values",
-        delta.get("value_add") or [],
-        [],
-    )
+
+    # Values use tagged dicts {label, schwartz}, so merge by label (case-
+    # insensitive) and let a new entry's schwartz tag fill in a previously-
+    # null one for the same label.
+    existing_values = list(new_state["adaptations"].get("values") or [])
+    by_label: dict[str, dict] = {}
+    for v in existing_values:
+        normalized = normalize_value_entry(v, max_len=_STRING_MAX_LEN)
+        if normalized is not None:
+            by_label[normalized["label"].lower()] = normalized
+    for v in delta.get("value_add") or []:
+        normalized = normalize_value_entry(v, max_len=_STRING_MAX_LEN)
+        if normalized is None:
+            continue
+        key = normalized["label"].lower()
+        if key in by_label:
+            # Promote a null tag to the new tag if one is now provided
+            if by_label[key]["schwartz"] is None and normalized["schwartz"] is not None:
+                by_label[key] = normalized
+        else:
+            by_label[key] = normalized
+        if len(by_label) >= _LIST_MAX_LEN:
+            break
+    new_state["adaptations"]["values"] = list(by_label.values())[:_LIST_MAX_LEN]
 
     if delta.get("stance"):
         new_state["adaptations"]["relational_stance"] = delta["stance"]

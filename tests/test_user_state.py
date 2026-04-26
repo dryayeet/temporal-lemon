@@ -55,6 +55,32 @@ def test_validate_dedupes_string_lists_case_insensitively():
     parsed = {"adaptations": {"values": ["family", "Family", "career"]}}
     out = validate_user_state(parsed, fallback=DEFAULT_USER_STATE)
     assert len(out["adaptations"]["values"]) == 2
+    # Legacy strings normalize to {label, schwartz=None}
+    assert all(isinstance(v, dict) for v in out["adaptations"]["values"])
+    assert all(v["schwartz"] is None for v in out["adaptations"]["values"])
+
+
+def test_validate_preserves_tagged_value_dicts():
+    parsed = {"adaptations": {"values": [
+        {"label": "family", "schwartz": "benevolence"},
+        {"label": "career", "schwartz": "achievement"},
+    ]}}
+    out = validate_user_state(parsed, fallback=DEFAULT_USER_STATE)
+    labels = {v["label"]: v["schwartz"] for v in out["adaptations"]["values"]}
+    assert labels["family"] == "benevolence"
+    assert labels["career"] == "achievement"
+
+
+def test_validate_drops_unknown_schwartz_tag_to_null():
+    parsed = {"adaptations": {"values": [{"label": "x", "schwartz": "not_a_tag"}]}}
+    out = validate_user_state(parsed, fallback=DEFAULT_USER_STATE)
+    assert out["adaptations"]["values"] == [{"label": "x", "schwartz": None}]
+
+
+def test_validate_canonicalizes_alias_schwartz_tags():
+    parsed = {"adaptations": {"values": [{"label": "creativity", "schwartz": "self-direction"}]}}
+    out = validate_user_state(parsed, fallback=DEFAULT_USER_STATE)
+    assert out["adaptations"]["values"][0]["schwartz"] == "self_direction"
 
 
 # ---------- validate_delta ----------
@@ -142,6 +168,33 @@ def test_apply_delta_does_not_mutate_prev():
     assert prev == snapshot
 
 
+def test_apply_delta_adds_tagged_value():
+    prev = copy.deepcopy(DEFAULT_USER_STATE)
+    delta = validate_delta({"value_add": [{"label": "family", "schwartz": "benevolence"}]})
+    out = apply_delta(prev, delta)
+    assert {"label": "family", "schwartz": "benevolence"} in out["adaptations"]["values"]
+
+
+def test_apply_delta_value_add_promotes_null_tag_to_real_tag():
+    """If the existing value has schwartz=None and the same label arrives with
+    a real tag, the tag fills in."""
+    prev = copy.deepcopy(DEFAULT_USER_STATE)
+    prev["adaptations"]["values"] = [{"label": "honesty", "schwartz": None}]
+    delta = validate_delta({"value_add": [{"label": "honesty", "schwartz": "universalism"}]})
+    out = apply_delta(prev, delta)
+    assert out["adaptations"]["values"] == [{"label": "honesty", "schwartz": "universalism"}]
+
+
+def test_apply_delta_value_add_dedupes_by_label_case_insensitive():
+    prev = copy.deepcopy(DEFAULT_USER_STATE)
+    prev["adaptations"]["values"] = [{"label": "Family", "schwartz": "benevolence"}]
+    delta = validate_delta({"value_add": [{"label": "family", "schwartz": "tradition"}]})
+    out = apply_delta(prev, delta)
+    # Existing tag is real; doesn't get overwritten
+    assert len(out["adaptations"]["values"]) == 1
+    assert out["adaptations"]["values"][0]["schwartz"] == "benevolence"
+
+
 # ---------- is_cold_start ----------
 
 def test_default_is_cold_start():
@@ -212,12 +265,28 @@ def test_save_load_roundtrip():
     s["state"]["pleasure"] = -0.2
     s["traits"]["agreeableness"] = 0.6
     s["adaptations"]["current_goals"] = ["prep exam"]
+    s["adaptations"]["values"] = [{"label": "family", "schwartz": "benevolence"}]
     save_user_state(s)
     loaded = load_user_state()
     assert loaded["state"]["mood_label"] == "tired"
     assert loaded["state"]["pleasure"] == -0.2
     assert loaded["traits"]["agreeableness"] == 0.6
     assert loaded["adaptations"]["current_goals"] == ["prep exam"]
+    assert loaded["adaptations"]["values"] == [{"label": "family", "schwartz": "benevolence"}]
+
+
+def test_save_load_legacy_string_values_normalize_on_read():
+    """A snapshot saved before Schwartz tagging shipped (raw string values)
+    should normalize to the tagged shape when read back."""
+    from storage import db
+    legacy = copy.deepcopy(DEFAULT_USER_STATE)
+    legacy["adaptations"]["values"] = ["honesty", "family"]   # legacy shape
+    db.save_user_state_snapshot(legacy)
+    loaded = load_user_state()
+    assert loaded["adaptations"]["values"] == [
+        {"label": "honesty", "schwartz": None},
+        {"label": "family",  "schwartz": None},
+    ]
 
 
 def test_load_returns_latest_snapshot():

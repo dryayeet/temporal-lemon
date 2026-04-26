@@ -189,14 +189,22 @@ def load_lemon_state() -> dict:
 
 def fresh_lemon_session_state() -> dict:
     """Load latest, re-peg the PAD/state layer to LEMON_SESSION_START_STATE,
-    and reset relational_stance to the persona baseline. Concerns and goals
-    carry over so cross-session continuity (remembering what's quietly on
-    lemon's mind) still works."""
+    and reset persona-fixed adaptation slots (relational_stance and values)
+    to the persona baseline. Concerns and goals carry over so cross-session
+    continuity (remembering what's quietly on lemon's mind) still works.
+
+    Values are re-pulled from `persona.LEMON_ADAPTATIONS` each session so
+    Schwartz tagging updates / persona edits propagate without manual
+    migration of persisted snapshots.
+    """
     state = load_lemon_state()
     state["state"] = dict(LEMON_SESSION_START_STATE)
-    # Reset relational_stance to the persona baseline; concerns/goals persist.
+    # Reset persona-fixed adaptation slots; concerns/goals persist.
     state["adaptations"]["relational_stance"] = LEMON_ADAPTATIONS.get("relational_stance")
-    return state
+    state["adaptations"]["values"] = list(LEMON_ADAPTATIONS.get("values") or [])
+    # Re-validate so any string-form values from older snapshots get normalized
+    # into the tagged shape consistently with the rest of the schema.
+    return validate_lemon_state(state, fallback=DEFAULT_LEMON_STATE)
 
 
 def save_lemon_state(state: dict, session_id: Optional[int] = None) -> None:
